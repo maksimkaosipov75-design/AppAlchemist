@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/vnd.debian.binary-package">
+    <comment>Debian package</comment>
+    <comment xml:lang="ru">Пакет Debian</comment>
+    <glob pattern="*.deb"/>
+    <icon name="application-x-deb"/>
+  </mime-type>
+</mime-info>
+
+
+

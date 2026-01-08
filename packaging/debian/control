@@ -1,0 +1,37 @@
+Source: appalchemist
+Section: utils
+Priority: optional
+Maintainer: AppAlchemist Team <appalchemist@example.com>
+Build-Depends: debhelper (>= 13),
+               cmake (>= 3.15),
+               qt6-base-dev,
+               qt6-base-dev-tools,
+               libqt6core6,
+               libqt6widgets6
+Standards-Version: 4.6.0
+Homepage: https://github.com/appalchemist/appalchemist
+Vcs-Browser: https://github.com/appalchemist/appalchemist
+Vcs-Git: https://github.com/appalchemist/appalchemist.git
+
+Package: appalchemist
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends},
+         qt6-base,
+         libqt6core6,
+         libqt6widgets6
+Description: Convert .deb and .rpm packages to AppImage format
+ AppAlchemist is a graphical application that converts Linux package
+ formats (.deb and .rpm) into self-contained AppImage files that can
+ run on any Linux distribution without installation.
+ .
+ Features:
+  - Drag-and-drop interface for easy conversion
+  - Support for both Debian (.deb) and RPM (.rpm) packages
+  - Automatic dependency analysis and bundling
+  - Creates portable AppImage files
+
+
+
+
+
+

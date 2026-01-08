@@ -1,0 +1,41 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+export CMAKE_BUILD_TYPE = Release
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	dh_auto_configure -- -DCMAKE_BUILD_TYPE=Release
+
+override_dh_auto_install:
+	dh_auto_install
+	# Install desktop file
+	install -D -m 644 debian/appalchemist.desktop \
+		$(CURDIR)/debian/appalchemist/usr/share/applications/appalchemist.desktop
+	# Install bundled appimagetool if available
+	if [ -f ../thirdparty/appimagetool ]; then \
+		mkdir -p $(CURDIR)/debian/appalchemist/usr/lib/appalchemist; \
+		install -D -m 755 ../thirdparty/appimagetool \
+			$(CURDIR)/debian/appalchemist/usr/lib/appalchemist/appimagetool; \
+	fi
+	# Install icon
+	if [ -f ../assets/icons/appalchemist.png ]; then \
+		install -D -m 644 ../assets/icons/appalchemist.png \
+			$(CURDIR)/debian/appalchemist/usr/share/pixmaps/appalchemist.png; \
+		for size in 16 32 48 64 128 256; do \
+			mkdir -p $(CURDIR)/debian/appalchemist/usr/share/icons/hicolor/$${size}x$${size}/apps; \
+			install -m 644 ../assets/icons/appalchemist.png \
+				$(CURDIR)/debian/appalchemist/usr/share/icons/hicolor/$${size}x$${size}/apps/appalchemist.png; \
+		done; \
+	fi
+
+override_dh_auto_build:
+	dh_auto_build
+
+
+
+
+
+

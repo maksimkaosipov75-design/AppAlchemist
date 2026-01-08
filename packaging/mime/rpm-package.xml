@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-rpm">
+    <comment>RPM package</comment>
+    <comment xml:lang="ru">Пакет RPM</comment>
+    <glob pattern="*.rpm"/>
+    <icon name="application-x-rpm"/>
+  </mime-type>
+</mime-info>
+
+
+
