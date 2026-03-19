@@ -31,6 +31,9 @@ set(APPALCHEMIST_BACKEND_SOURCES
     src/repository_search_worker.cpp
     src/repository_browser.cpp
     src/conversion_controller.cpp
+    src/package_extractor.cpp
+    src/package_inspector.cpp
+    src/package_packager.cpp
     src/package_profile.cpp
     src/compatibility_rules.cpp
     src/runtime_probe.cpp
@@ -52,6 +55,9 @@ set(APPALCHEMIST_BACKEND_HEADERS
     include/repository_search_worker.h
     include/repository_browser.h
     include/conversion_controller.h
+    include/package_extractor.h
+    include/package_inspector.h
+    include/package_packager.h
     include/package_profile.h
     include/compatibility_rules.h
     include/runtime_probe.h

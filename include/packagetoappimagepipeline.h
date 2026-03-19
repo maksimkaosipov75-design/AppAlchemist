@@ -12,6 +12,9 @@
 #include "appimagebuilder.h"
 #include "size_optimizer.h"
 #include "dependency_resolver.h"
+#include "package_extractor.h"
+#include "package_inspector.h"
+#include "package_packager.h"
 #include "package_profile.h"
 #include "runtime_probe.h"
 
@@ -80,6 +83,9 @@ private:
     DependencyAnalyzer* m_analyzer;
     AppDirBuilder* m_appDirBuilder;
     AppImageBuilder* m_appImageBuilder;
+    PackageExtractor* m_packageExtractor;
+    PackageInspector* m_packageInspector;
+    PackagePackager* m_packagePackager;
     SizeOptimizer* m_sizeOptimizer;
     DependencyResolver* m_dependencyResolver;
     OptimizationSettings m_optimizationSettings;

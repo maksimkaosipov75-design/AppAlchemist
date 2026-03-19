@@ -40,6 +40,7 @@ Preserve the current "double-click package -> short wait -> usable app on Arch/C
 - Conversion cache metadata is now written and read via `CacheManager` using package-hash keyed JSON records, with legacy file/mtime lookup kept as a fallback path.
 - Tarballs are now classified into explicit subtypes in `PackageProfile`, improving planning and logging for portable bundles, installer archives, source archives, and self-contained app bundles.
 - Initial rules-driven compatibility fixes now load from `assets/compatibility_rules.json` via a dedicated compatibility rule engine instead of being fully hardcoded in AppRun generation.
+- `PackageToAppImagePipeline` now delegates extraction, inspection/classification, and packaging to dedicated backend components instead of owning those responsibilities inline.
 
 ## Mid-Term Steps
 1. Implemented in code: add persistent package-hash based conversion cache metadata, not only cached AppImage file lookup.
@@ -49,7 +50,7 @@ Preserve the current "double-click package -> short wait -> usable app on Arch/C
    - source tarball
    - self-contained app bundle
 3. Implemented initial version in code: introduce rules-driven compatibility fixes from a data file, not hardcoded branches.
-4. Separate package extraction, classification, repair, validation, and packaging into distinct components.
+4. Implemented initial component split: separate package extraction, classification/inspection, and packaging into distinct components while keeping repair orchestration in the main pipeline.
 5. Implemented initial corpus manifest: build a regression corpus of real packages and store expected outcomes.
 
 ## Guardrails
