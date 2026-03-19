@@ -108,45 +108,60 @@ target_link_libraries(appalchemist_backend
         Qt6::Sql
 )
 
-add_executable(appalchemist
-    ${APPALCHEMIST_QT_GUI_SOURCES}
-    ${APPALCHEMIST_QT_GUI_HEADERS}
-    ${APPALCHEMIST_UI}
-)
-
-target_link_libraries(appalchemist
-    PRIVATE
-        appalchemist_backend
-        Qt6::Widgets
-)
-
 if(PkgConfig_FOUND)
     pkg_check_modules(GTK_FRONTEND IMPORTED_TARGET gtk4 libadwaita-1)
 endif()
 
 if(GTK_FRONTEND_FOUND)
-    add_executable(appalchemist-gtk
+    add_executable(appalchemist
         frontend/gtk/main.cpp
         frontend/gtk/app.cpp
         frontend/gtk/app.h
         frontend/gtk/app_window.cpp
         frontend/gtk/app_window.h
+        src/cli_converter.cpp
+        include/cli_converter.h
     )
 
-    target_include_directories(appalchemist-gtk
+    target_include_directories(appalchemist
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/frontend/gtk
     )
 
-    target_compile_definitions(appalchemist-gtk
+    target_compile_definitions(appalchemist
         PRIVATE
             APPALCHEMIST_GTK_STYLE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/frontend/gtk/style.css"
     )
 
-    target_link_libraries(appalchemist-gtk
+    target_link_libraries(appalchemist
         PRIVATE
             appalchemist_backend
             PkgConfig::GTK_FRONTEND
+            Qt6::Widgets
+    )
+
+    add_executable(appalchemist-qt
+        ${APPALCHEMIST_QT_GUI_SOURCES}
+        ${APPALCHEMIST_QT_GUI_HEADERS}
+        ${APPALCHEMIST_UI}
+    )
+
+    target_link_libraries(appalchemist-qt
+        PRIVATE
+            appalchemist_backend
+            Qt6::Widgets
+    )
+else()
+    add_executable(appalchemist
+        ${APPALCHEMIST_QT_GUI_SOURCES}
+        ${APPALCHEMIST_QT_GUI_HEADERS}
+        ${APPALCHEMIST_UI}
+    )
+
+    target_link_libraries(appalchemist
+        PRIVATE
+            appalchemist_backend
+            Qt6::Widgets
     )
 endif()
 

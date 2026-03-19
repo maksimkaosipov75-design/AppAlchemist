@@ -1,0 +1,33 @@
+FROM --platform=linux/arm64 ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    qt6-base-dev \
+    qt6-base-dev-tools \
+    libqt6widgets6 \
+    wget \
+    file \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy source code
+COPY . /build/
+
+# Build AppImage
+RUN chmod +x packaging/build-appimage-arm64.sh && \
+    ./packaging/build-appimage-arm64.sh
+
+# The output will be in /build/releases/AppAlchemist-ARM64.AppImage
+
+
+
+
+
+
+
+

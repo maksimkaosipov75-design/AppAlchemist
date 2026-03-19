@@ -77,14 +77,7 @@ AppInfo AppDetector::detectApp(const QString& appDirPath,
         return info;
     }
     
-    // Check for scripts
-    if (isScript(mainExecutable)) {
-        info.type = AppType::Script;
-        info.executablePath = mainExecutable;
-        return info;
-    }
-    
-    // Check for Chrome/Chromium (special case)
+    // Check for Chrome/Chromium (special case) - BEFORE Electron check
     if (execPath.contains("/opt/google/chrome/") || 
         execPath.contains("/opt/chromium/") ||
         execName == "chrome" || execName == "chromium") {
@@ -96,7 +89,8 @@ AppInfo AppDetector::detectApp(const QString& appDirPath,
         return info;
     }
     
-    // Check for Electron applications
+    // Check for Electron applications - BEFORE Script check
+    // Many Electron apps have binaries in /usr/bin that are NOT shell scripts
     QString electronBaseDir = findElectronBaseDir(appDirPath);
     if (!electronBaseDir.isEmpty()) {
         info.type = AppType::Electron;
@@ -144,6 +138,13 @@ AppInfo AppDetector::detectApp(const QString& appDirPath,
         return info;
     }
     
+    // Check for scripts - AFTER Electron check (Electron apps often have launchers in /bin/)
+    if (isScript(mainExecutable)) {
+        info.type = AppType::Script;
+        info.executablePath = mainExecutable;
+        return info;
+    }
+    
     // Default: Native application
     info.type = AppType::Native;
     info.executablePath = mainExecutable;
@@ -187,11 +188,22 @@ bool AppDetector::isElectronApp(const QString& dirPath) {
 QString AppDetector::findElectronBaseDir(const QString& appDirPath) {
     // Check common Electron locations
     QStringList electronDirs = {
+        "usr/share/discord",
         "usr/share/code",
         "usr/share/code-oss",
         "usr/share/codium",
+        "usr/share/slack",
+        "usr/share/teams",
+        "usr/share/signal-desktop",
+        "usr/share/spotify",
+        "usr/share/skypeforlinux",
+        "usr/lib/discord",
         "usr/lib/yandex-music",
-        "opt/yandex-music"
+        "opt/discord",
+        "opt/yandex-music",
+        "opt/slack",
+        "opt/teams",
+        "opt/spotify"
     };
     
     // First, check known locations
@@ -234,10 +246,43 @@ bool AppDetector::isScript(const QString& executablePath) {
     }
     
     QFileInfo info(executablePath);
-    return info.suffix().toLower() == "sh" || 
-           info.fileName().endsWith(".sh") ||
-           (info.isFile() && QFile::exists(executablePath)) && 
-           (executablePath.contains("/bin/") || executablePath.contains("/sbin/"));
+    
+    // Check by extension first
+    if (info.suffix().toLower() == "sh" || info.fileName().endsWith(".sh")) {
+        return true;
+    }
+    
+    // For files in /bin/ or /sbin/, check if they're actually shell scripts
+    // by looking at the first bytes (magic bytes or shebang)
+    if (info.isFile() && QFile::exists(executablePath)) {
+        QFile file(executablePath);
+        if (file.open(QIODevice::ReadOnly)) {
+            QByteArray header = file.read(4);
+            file.close();
+            
+            // Check for ELF magic bytes (0x7F 'E' 'L' 'F') - NOT a script
+            if (header.size() >= 4 && 
+                header[0] == 0x7F && 
+                header[1] == 'E' && 
+                header[2] == 'L' && 
+                header[3] == 'F') {
+                return false;  // This is an ELF binary, not a script
+            }
+            
+            // Check for shebang (#!) - this IS a script
+            if (header.size() >= 2 && header[0] == '#' && header[1] == '!') {
+                // Make sure it's not a Python shebang (already handled by isPython)
+                file.open(QIODevice::ReadOnly);
+                QByteArray firstLine = file.readLine();
+                file.close();
+                if (!firstLine.contains("python")) {
+                    return true;  // Shell script
+                }
+            }
+        }
+    }
+    
+    return false;
 }
 
 bool AppDetector::isJava(const QString& executablePath) {
@@ -445,8 +490,14 @@ bool AppDetector::hasElectronIndicators(const QString& dirPath) {
         "v8_context_snapshot.bin",
         "resources.pak",
         "electron",
-        "code",  // VS Code executable
-        "codium"  // VSCodium executable
+        "Discord",          // Discord executable
+        "discord",          // discord lowercase
+        "code",             // VS Code executable
+        "codium",           // VSCodium executable
+        "slack",            // Slack
+        "teams",            // Teams
+        "spotify",          // Spotify
+        "chrome_crashpad_handler"  // Common in Electron/Chrome apps
     };
     
     // Check for electron binary or resources
@@ -471,27 +522,59 @@ bool AppDetector::hasElectronIndicators(const QString& dirPath) {
     return false;
 }
 
-QString AppDetector::findElectronBinary(const QString& baseDir) {
-    QStringList possibleNames = {"electron", "code", "codium"};
+QString AppDetector::findElectronBinary(const QString& fullBaseDirPath) {
+    // Safety check: if path is empty or contains dangerous patterns
+    if (fullBaseDirPath.isEmpty() || fullBaseDirPath.contains("..")) {
+        return QString();
+    }
+    
+    // Check if directory exists
+    QDir baseDir(fullBaseDirPath);
+    if (!baseDir.exists()) {
+        return QString();
+    }
+    
+    // Common Electron binary names - include app-specific names
+    QStringList possibleNames = {
+        "electron", 
+        "Discord", "discord",  // Discord
+        "code", "codium",      // VS Code
+        "Slack", "slack",      // Slack
+        "teams", "Teams",      // Teams
+        "spotify", "Spotify",  // Spotify
+        "signal-desktop"       // Signal
+    };
     
     // First check in electron/ subdirectory (common for packaged Electron apps)
-    for (const QString& name : possibleNames) {
-        QString path = QString("%1/electron/%2").arg(baseDir).arg(name);
-        if (QFile::exists(path)) {
-            return QString("electron/%1").arg(name);
+    QString electronSubdir = QString("%1/electron").arg(fullBaseDirPath);
+    if (QDir(electronSubdir).exists()) {
+        for (const QString& name : possibleNames) {
+            QString path = QString("%1/%2").arg(electronSubdir).arg(name);
+            QFileInfo info(path);
+            if (info.exists() && info.isExecutable()) {
+                return QString("electron/%1").arg(name);
+            }
         }
     }
     
     // Then check directly in base directory
     for (const QString& name : possibleNames) {
-        QString path = QString("%1/%2").arg(baseDir).arg(name);
-        if (QFile::exists(path)) {
+        QString path = QString("%1/%2").arg(fullBaseDirPath).arg(name);
+        QFileInfo info(path);
+        if (info.exists() && info.isExecutable()) {
             return name;
         }
-        // Check in bin/ subdirectory
-        path = QString("%1/bin/%2").arg(baseDir).arg(name);
-        if (QFile::exists(path)) {
-            return QString("bin/%1").arg(name);
+    }
+    
+    // Check in bin/ subdirectory
+    QString binSubdir = QString("%1/bin").arg(fullBaseDirPath);
+    if (QDir(binSubdir).exists()) {
+        for (const QString& name : possibleNames) {
+            QString path = QString("%1/%2").arg(binSubdir).arg(name);
+            QFileInfo info(path);
+            if (info.exists() && info.isExecutable()) {
+                return QString("bin/%1").arg(name);
+            }
         }
     }
     

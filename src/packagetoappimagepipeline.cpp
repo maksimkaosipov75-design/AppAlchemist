@@ -15,21 +15,32 @@ PackageToAppImagePipeline::PackageToAppImagePipeline(QObject* parent)
     , m_cancelled(false)
     , m_debParser(new DebParser())
     , m_rpmParser(new RpmParser())
+    , m_tarballParser(new TarballParser())
     , m_analyzer(new DependencyAnalyzer())
     , m_appDirBuilder(new AppDirBuilder())
     , m_appImageBuilder(new AppImageBuilder(this))
+    , m_sizeOptimizer(new SizeOptimizer(this))
+    , m_dependencyResolver(new DependencyResolver(this))
 {
     // Forward log signals from AppImageBuilder
     connect(m_appImageBuilder, &AppImageBuilder::log, this, &PackageToAppImagePipeline::log);
+    
+    // Forward log signals from SizeOptimizer
+    connect(m_sizeOptimizer, &SizeOptimizer::log, this, &PackageToAppImagePipeline::log);
+    
+    // Forward log signals from DependencyResolver
+    connect(m_dependencyResolver, &DependencyResolver::log, this, &PackageToAppImagePipeline::log);
 }
 
 PackageToAppImagePipeline::~PackageToAppImagePipeline() {
     cleanup();
     delete m_debParser;
     delete m_rpmParser;
+    delete m_tarballParser;
     delete m_analyzer;
     delete m_appDirBuilder;
     delete m_appImageBuilder;
+    // m_sizeOptimizer is deleted by QObject parent
 }
 
 void PackageToAppImagePipeline::setPackagePath(const QString& packagePath) {
@@ -39,6 +50,26 @@ void PackageToAppImagePipeline::setPackagePath(const QString& packagePath) {
 
 void PackageToAppImagePipeline::setOutputPath(const QString& outputPath) {
     m_outputPath = outputPath;
+}
+
+void PackageToAppImagePipeline::setOptimizationSettings(const OptimizationSettings& settings) {
+    m_optimizationSettings = settings;
+}
+
+OptimizationSettings PackageToAppImagePipeline::optimizationSettings() const {
+    return m_optimizationSettings;
+}
+
+void PackageToAppImagePipeline::setDependencySettings(const DependencySettings& settings) {
+    m_dependencySettings = settings;
+}
+
+DependencySettings PackageToAppImagePipeline::dependencySettings() const {
+    return m_dependencySettings;
+}
+
+void PackageToAppImagePipeline::setSudoPassword(const QString& password) {
+    m_dependencyResolver->setSudoPassword(password);
 }
 
 void PackageToAppImagePipeline::start() {
@@ -60,6 +91,8 @@ PackageType PackageToAppImagePipeline::detectPackageType(const QString& packageP
         return PackageType::DEB;
     } else if (suffix == "rpm") {
         return PackageType::RPM;
+    } else if (TarballParser::isSupportedTarball(packagePath)) {
+        return PackageType::TARBALL;
     }
     
     return PackageType::UNKNOWN;
@@ -72,6 +105,8 @@ void PackageToAppImagePipeline::process() {
         packageTypeStr = ".deb";
     } else if (m_packageType == PackageType::RPM) {
         packageTypeStr = ".rpm";
+    } else if (m_packageType == PackageType::TARBALL) {
+        packageTypeStr = "tarball";
     } else {
         packageTypeStr = "package";
     }
@@ -137,7 +172,7 @@ void PackageToAppImagePipeline::process() {
         return;
     }
     
-    emit progress(60, "Building AppDir structure...");
+    emit progress(55, "Building AppDir structure...");
     if (!buildAppDir()) {
         emit error("Failed to build AppDir");
         cleanup();
@@ -145,13 +180,61 @@ void PackageToAppImagePipeline::process() {
         return;
     }
     
-    // Step 5: Build AppImage
+    // Step 5: Resolve missing libraries (if enabled)
     if (m_cancelled) {
         emit finished();
         return;
     }
     
-    emit progress(80, "Building AppImage...");
+    if (m_dependencySettings.enabled) {
+        emit progress(65, "Resolving missing libraries...");
+        m_dependencyResolver->setSettings(m_dependencySettings);
+        
+        // Find main executable
+        QString mainExec;
+        if (!m_metadata.executables.isEmpty()) {
+            mainExec = m_appDirPath + "/usr/bin/" + QFileInfo(m_metadata.executables.first()).fileName();
+            if (!QFileInfo::exists(mainExec)) {
+                // Try to find in AppDir
+                QDir binDir(m_appDirPath + "/usr/bin");
+                QStringList execs = binDir.entryList(QDir::Files | QDir::Executable);
+                if (!execs.isEmpty()) {
+                    mainExec = binDir.absoluteFilePath(execs.first());
+                }
+            }
+        }
+        
+        if (!mainExec.isEmpty() && QFileInfo::exists(mainExec)) {
+            emit log(QString("Analyzing dependencies for: %1").arg(mainExec));
+            if (!m_dependencyResolver->resolveMissingLibraries(mainExec, m_appDirPath)) {
+                emit log("WARNING: Some dependencies could not be resolved");
+            }
+        } else {
+            emit log("WARNING: Could not find main executable for dependency analysis");
+        }
+    }
+    
+    // Step 6: Optimize AppDir (if enabled)
+    if (m_cancelled) {
+        emit finished();
+        return;
+    }
+    
+    if (m_optimizationSettings.enabled) {
+        emit progress(75, "Optimizing AppDir size...");
+        m_sizeOptimizer->setSettings(m_optimizationSettings);
+        if (!m_sizeOptimizer->optimizeAppDir(m_appDirPath)) {
+            emit log("WARNING: Size optimization failed, continuing anyway...");
+        }
+    }
+    
+    // Step 7: Build AppImage
+    if (m_cancelled) {
+        emit finished();
+        return;
+    }
+    
+    emit progress(85, "Building AppImage...");
     if (!buildAppImage()) {
         QString errorMsg = "Failed to build AppImage.\n\n";
         if (m_appImageBuilder->findAppImageTool().isEmpty()) {
@@ -198,6 +281,12 @@ bool PackageToAppImagePipeline::validateInput() {
             return false;
         }
         emit log(QString("Valid .rpm file: %1").arg(m_packagePath));
+    } else if (m_packageType == PackageType::TARBALL) {
+        if (!m_tarballParser->validateTarball(m_packagePath)) {
+            emit log("ERROR: Invalid tarball file format");
+            return false;
+        }
+        emit log(QString("Valid tarball file: %1").arg(m_packagePath));
     } else {
         emit log("ERROR: Unknown package type");
         return false;
@@ -217,6 +306,24 @@ bool PackageToAppImagePipeline::extractPackage() {
         }
         emit log("Successfully extracted .deb package");
         m_metadata = m_debParser->parseMetadata(m_extractedPackageDir);
+    } else if (m_packageType == PackageType::TARBALL) {
+        if (!m_tarballParser->extractTarball(m_packagePath, m_extractedPackageDir)) {
+            emit log("ERROR: Failed to extract tarball");
+            return false;
+        }
+        emit log("Successfully extracted tarball");
+        m_metadata = m_tarballParser->parseMetadata(m_extractedPackageDir);
+        
+        // Use tarball filename for package name if not found
+        if (m_metadata.package.isEmpty()) {
+            QFileInfo info(m_packagePath);
+            QString baseName = info.baseName();
+            // Remove common extensions from basename
+            baseName.remove(QRegularExpression(R"(\.(tar|linux|x86_64|amd64)$)", QRegularExpression::CaseInsensitiveOption));
+            m_metadata.package = baseName;
+        }
+        
+        emit log(QString("Detected package: %1, Version: %2").arg(m_metadata.package).arg(m_metadata.version));
     } else if (m_packageType == PackageType::RPM) {
         if (!m_rpmParser->extractRpm(m_packagePath, m_extractedPackageDir)) {
             emit log("ERROR: Failed to extract .rpm package");
@@ -465,6 +572,22 @@ bool PackageToAppImagePipeline::analyzeDependencies() {
     QStringList warnings = m_analyzer->checkSystemDependencies(m_metadata.depends);
     for (const QString& warning : warnings) {
         emit log(QString("WARNING: %1").arg(warning));
+    }
+    
+    // Resolve and download missing dependencies if enabled
+    if (m_dependencySettings.enabled && !m_metadata.depends.isEmpty()) {
+        emit log("Resolving package dependencies...");
+        m_dependencyResolver->setSettings(m_dependencySettings);
+        
+        QList<ResolvedDependency> resolved = m_dependencyResolver->resolveDependencies(
+            m_metadata.depends, m_appDirPath);
+        
+        // Add resolved libraries to the list
+        QStringList additionalLibs = m_dependencyResolver->getResolvedLibraries();
+        if (!additionalLibs.isEmpty()) {
+            emit log(QString("Added %1 libraries from dependencies").arg(additionalLibs.size()));
+            m_libraries.append(additionalLibs);
+        }
     }
     
     return true;

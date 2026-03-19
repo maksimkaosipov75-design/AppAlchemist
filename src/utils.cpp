@@ -4,6 +4,7 @@
 #include <QFile>
 #include <QCryptographicHash>
 #include <QStandardPaths>
+#include <QThread>
 #include <QDebug>
 
 ProcessResult SubprocessWrapper::execute(const QString& command, 
@@ -141,6 +142,12 @@ QString SubprocessWrapper::generateHash(const QString& filePath) {
 }
 
 bool SubprocessWrapper::setExecutable(const QString& filePath) {
+    // Safety check: verify file exists before trying to set permissions
+    QFileInfo fileInfo(filePath);
+    if (!fileInfo.exists()) {
+        qWarning() << "File does not exist for setExecutable:" << filePath;
+        return false;
+    }
     QFile file(filePath);
     if (!file.exists()) {
         return false;
@@ -180,5 +187,96 @@ bool SubprocessWrapper::createHardLink(const QString& source, const QString& des
     
     // If link() fails, fall back to copy
     return QFile::copy(source, destination);
+}
+
+QString detectSystemArchitecture() {
+    QProcess process;
+    process.start("uname", QStringList() << "-m");
+    if (!process.waitForFinished(5000)) {
+        return "x86_64"; // Default fallback
+    }
+    QString arch = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
+    if (arch == "aarch64" || arch == "arm64") {
+        return "aarch64";
+    } else if (arch == "x86_64") {
+        return "x86_64";
+    }
+    return "x86_64"; // Default fallback
+}
+
+ProcessResult SubprocessWrapper::executeWithSudo(const QString& command,
+                                                  const QStringList& arguments,
+                                                  const QString& password,
+                                                  const QString& workingDirectory,
+                                                  int timeoutMs) {
+    ProcessResult result;
+    result.success = false;
+    
+    QProcess process;
+    
+    // Build sudo command: echo "password" | sudo -S command args
+    QStringList sudoArgs;
+    sudoArgs << "-S";  // Read password from stdin
+    sudoArgs << command;
+    sudoArgs << arguments;
+    
+    process.setProgram("sudo");
+    process.setArguments(sudoArgs);
+    
+    if (!workingDirectory.isEmpty()) {
+        process.setWorkingDirectory(workingDirectory);
+    }
+    
+    process.start();
+    
+    if (!process.waitForStarted(timeoutMs)) {
+        result.errorMessage = QString("Failed to start sudo process: %1").arg(command);
+        return result;
+    }
+    
+    // Write password to stdin
+    if (!password.isEmpty()) {
+        // Wait a bit for sudo to prompt for password (it may write to stderr first)
+        QThread::msleep(100);
+        
+        // Check if process is still running
+        if (process.state() != QProcess::Running) {
+            result.errorMessage = "Sudo process terminated before password could be sent";
+            return result;
+        }
+        
+        // Write password with newline
+        QByteArray passwordBytes = password.toUtf8() + "\n";
+        qint64 written = process.write(passwordBytes);
+        
+        if (written != passwordBytes.size()) {
+            result.errorMessage = QString("Failed to write password to sudo (wrote %1 of %2 bytes)")
+                .arg(written).arg(passwordBytes.size());
+            return result;
+        }
+        
+        // Flush and close write channel
+        process.waitForBytesWritten(1000);
+        process.closeWriteChannel();
+    }
+    
+    if (!process.waitForFinished(timeoutMs)) {
+        process.kill();
+        result.errorMessage = QString("Sudo process timed out: %1").arg(command);
+        return result;
+    }
+    
+    result.exitCode = process.exitCode();
+    result.stdoutOutput = QString::fromUtf8(process.readAllStandardOutput());
+    result.stderrOutput = QString::fromUtf8(process.readAllStandardError());
+    result.success = (result.exitCode == 0);
+    
+    if (!result.success) {
+        result.errorMessage = QString("Sudo process failed with exit code %1: %2")
+            .arg(result.exitCode)
+            .arg(result.stderrOutput.isEmpty() ? result.stdoutOutput : result.stderrOutput);
+    }
+    
+    return result;
 }
 

@@ -23,6 +23,12 @@ public:
                                  int timeoutMs = 30000,
                                  const QProcessEnvironment& environment = QProcessEnvironment());
     
+    static ProcessResult executeWithSudo(const QString& command,
+                                         const QStringList& arguments = {},
+                                         const QString& password = {},
+                                         const QString& workingDirectory = {},
+                                         int timeoutMs = 30000);
+    
     static bool copyFile(const QString& source, const QString& destination);
     static bool copyDirectory(const QString& source, const QString& destination);
     static bool createDirectory(const QString& path);
@@ -31,6 +37,9 @@ public:
     static bool setExecutable(const QString& filePath);
     static bool createHardLink(const QString& source, const QString& destination);
 };
+
+// Architecture detection utility
+QString detectSystemArchitecture();
 
 #endif // UTILS_H
 

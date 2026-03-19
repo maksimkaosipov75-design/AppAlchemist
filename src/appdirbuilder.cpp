@@ -506,34 +506,55 @@ bool AppDirBuilder::buildAppDir(const QString& appDirPath,
     qDebug() << "AppRun created successfully";
     
     // Create symlink to main executable (skip for jar files, they're handled by AppRun)
-    if (!metadata.mainExecutable.isEmpty()) {
-        QFileInfo execInfo(metadata.mainExecutable);
-        QString execName = execInfo.fileName();
-        
-        // Don't create symlink for jar files
-        if (!execName.endsWith(".jar")) {
-            QString symlinkPath = QString("%1/%2").arg(appDirPath).arg(execName);
-            QString targetPath;
-            
-            // Determine correct target path based on where executable was placed
-            if (metadata.mainExecutable.contains("/usr/games/")) {
-                targetPath = QString("usr/games/%1").arg(execName);
-            } else if (metadata.mainExecutable.contains("/opt/")) {
-                targetPath = QString("opt/%1").arg(execName);
-            } else {
-                targetPath = QString("usr/bin/%1").arg(execName);
-            }
-            
-            QFile::remove(symlinkPath);
-            if (!QFile::link(targetPath, symlinkPath)) {
-                // Fallback: copy instead of symlink
-                QString sourcePath = QString("%1/%2").arg(appDirPath).arg(targetPath);
-                if (QFileInfo::exists(sourcePath)) {
-                    SubprocessWrapper::copyFile(sourcePath, symlinkPath);
-                    SubprocessWrapper::setExecutable(symlinkPath);
+    // Wrap in try-catch to prevent crashes
+    try {
+        if (!metadata.mainExecutable.isEmpty()) {
+            QFileInfo execInfo(metadata.mainExecutable);
+            if (execInfo.exists()) {
+                QString execName = execInfo.fileName();
+                
+                // Safety check: ensure execName is not empty and doesn't contain dangerous characters
+                if (!execName.isEmpty() && !execName.contains("..") && !execName.contains("/")) {
+                    // Don't create symlink for jar files
+                    if (!execName.endsWith(".jar")) {
+                        QString symlinkPath = QString("%1/%2").arg(appDirPath).arg(execName);
+                        QString targetPath;
+                        
+                        // Determine correct target path based on where executable was placed
+                        if (metadata.mainExecutable.contains("/usr/games/")) {
+                            targetPath = QString("usr/games/%1").arg(execName);
+                        } else if (metadata.mainExecutable.contains("/opt/")) {
+                            targetPath = QString("opt/%1").arg(execName);
+                        } else {
+                            targetPath = QString("usr/bin/%1").arg(execName);
+                        }
+                        
+                        // Verify target exists before creating symlink
+                        QString fullTargetPath = QString("%1/%2").arg(appDirPath).arg(targetPath);
+                        if (QFileInfo::exists(fullTargetPath)) {
+                            QFile::remove(symlinkPath);
+                            if (!QFile::link(targetPath, symlinkPath)) {
+                                // Fallback: copy instead of symlink
+                                QString sourcePath = QString("%1/%2").arg(appDirPath).arg(targetPath);
+                                if (QFileInfo::exists(sourcePath)) {
+                                    SubprocessWrapper::copyFile(sourcePath, symlinkPath);
+                                    SubprocessWrapper::setExecutable(symlinkPath);
+                                }
+                            }
+                        } else {
+                            qWarning() << "Target path does not exist for symlink:" << fullTargetPath;
+                        }
+                    }
+                } else {
+                    qWarning() << "Invalid executable name for symlink:" << execName;
                 }
+            } else {
+                qWarning() << "Main executable does not exist:" << metadata.mainExecutable;
             }
         }
+    } catch (...) {
+        qWarning() << "Exception occurred while creating symlink, continuing...";
+        // Don't fail the entire build if symlink creation fails
     }
     
     return true;
@@ -1093,26 +1114,52 @@ bool AppDirBuilder::copyIcon(const QString& appDirPath, const QString& iconPath,
 bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadata& metadata) {
     QString appRunPath = QString("%1/AppRun").arg(appDirPath);
     
+    // Safety check: ensure appDirPath exists
+    QDir appDir(appDirPath);
+    if (!appDir.exists()) {
+        qWarning() << "AppDir does not exist:" << appDirPath;
+        return false;
+    }
+    
     QFile file(appRunPath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        qWarning() << "Failed to open AppRun for writing:" << appRunPath;
         return false;
     }
     
     QTextStream out(&file);
+    // Qt6 uses UTF-8 by default for QTextStream
     out << "#!/bin/bash\n";
     out << "HERE=\"$(dirname \"$(readlink -f \"${0}\")\")\"\n";
     out << "\n";
     
     // UNIVERSAL: Detect application type
-    AppInfo appInfo = AppDetector::detectApp(appDirPath, "", 
-                                             metadata.mainExecutable.isEmpty() ? 
-                                             (metadata.executables.isEmpty() ? "" : metadata.executables.first()) : 
-                                             metadata.mainExecutable,
-                                             metadata);
+    // Wrap in try-catch to prevent crashes during detection
+    AppInfo appInfo;
+    try {
+        QString execPath = metadata.mainExecutable.isEmpty() ? 
+                          (metadata.executables.isEmpty() ? "" : metadata.executables.first()) : 
+                          metadata.mainExecutable;
+        appInfo = AppDetector::detectApp(appDirPath, "", execPath, metadata);
+    } catch (...) {
+        qWarning() << "Exception during app detection, using defaults";
+        // Use default AppInfo (will be Native type)
+        appInfo.type = AppType::Native;
+        appInfo.baseDir = "";
+        appInfo.workingDir = "${HERE}/usr/bin";
+    }
     
     // UNIVERSAL: Set up environment paths dynamically
     QStringList pathDirs = {"usr/bin", "usr/sbin", "usr/games"};
-    QStringList libDirs = {"usr/lib", "usr/lib/x86_64-linux-gnu"};
+    QString arch = detectSystemArchitecture();
+    QStringList libDirs = {"usr/lib"};
+    
+    // Add architecture-specific lib directory
+    if (arch == "aarch64") {
+        libDirs << "usr/lib/aarch64-linux-gnu";
+    } else if (arch == "x86_64") {
+        libDirs << "usr/lib/x86_64-linux-gnu";
+    }
     
     // Add opt directories if they exist
     QDir optDir(QString("%1/opt").arg(appDirPath));
@@ -1298,56 +1345,104 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
                 }
                 
                 // For Electron apps, try to find the actual Electron binary
-                QString electronBinary = AppDetector::findElectronBinary(appInfo.baseDir);
+                QString electronBinary;
                 QString electronBinaryPath;
-                if (!electronBinary.isEmpty()) {
-                    electronBinaryPath = QString("%1/%2").arg(appInfo.baseDir).arg(electronBinary);
-                    QFileInfo electronInfo(QString("%1/%2").arg(appDirPath).arg(electronBinaryPath));
-                    if (electronInfo.exists() && electronInfo.isExecutable()) {
-                        // Found Electron binary
-                        out << "# Found Electron binary: " << electronBinaryPath << "\n";
-                        out << "cd \"" << appInfo.workingDir << "\"\n";
-                        
-                        // Find .asar file in base directory
-                        QDir baseDir(QString("%1/%2").arg(appDirPath).arg(appInfo.baseDir));
-                        QStringList asarFiles = baseDir.entryList({"*.asar"}, QDir::Files);
-                        if (!asarFiles.isEmpty()) {
-                            QString asarFile = QString("%1/%2").arg(appInfo.baseDir).arg(asarFiles.first());
-                            out << "# Using .asar file: " << asarFile << "\n";
-                            out << "exec \"${HERE}/" << electronBinaryPath << "\" \"${HERE}/" << asarFile << "\" \"$@\"\n";
-                        } else if (!binLauncherPath.isEmpty()) {
+                if (!appInfo.baseDir.isEmpty()) {
+                    // Check if baseDir is a valid path in appDirPath
+                    QString fullBaseDirPath = QString("%1/%2").arg(appDirPath).arg(appInfo.baseDir);
+                    QDir baseDirCheck(fullBaseDirPath);
+                    if (baseDirCheck.exists()) {
+                        // Only call findElectronBinary if baseDir is valid and exists
+                        // Pass FULL path to findElectronBinary
+                        try {
+                            electronBinary = AppDetector::findElectronBinary(fullBaseDirPath);
+                            if (!electronBinary.isEmpty()) {
+                                electronBinaryPath = QString("%1/%2").arg(appInfo.baseDir).arg(electronBinary);
+                                QString fullElectronPath = QString("%1/%2").arg(appDirPath).arg(electronBinaryPath);
+                                QFileInfo electronInfo(fullElectronPath);
+                                qDebug() << "Checking Electron binary:" << fullElectronPath 
+                                         << "exists:" << electronInfo.exists() 
+                                         << "executable:" << electronInfo.isExecutable();
+                                if (!electronInfo.exists() || !electronInfo.isExecutable()) {
+                                    electronBinary.clear();
+                                    electronBinaryPath.clear();
+                                }
+                            }
+                        } catch (...) {
+                            // If findElectronBinary throws, just clear and continue
+                            electronBinary.clear();
+                            electronBinaryPath.clear();
+                        }
+                    }
+                }
+                
+                // Determine working directory - replace ${HERE} with actual path
+                QString workingDir = appInfo.workingDir;
+                if (workingDir.contains("${HERE}")) {
+                    // Extract path after ${HERE}/
+                    QString pathAfterHere = workingDir;
+                    pathAfterHere.replace("${HERE}/", "");
+                    if (!pathAfterHere.isEmpty()) {
+                        workingDir = QString("\"${HERE}/%1\"").arg(pathAfterHere);
+                    } else {
+                        workingDir = "\"${HERE}\"";
+                    }
+                } else if (!workingDir.isEmpty()) {
+                    workingDir = QString("\"%1\"").arg(workingDir);
+                }
+                
+                if (!electronBinary.isEmpty() && !electronBinaryPath.isEmpty()) {
+                    // Found Electron binary (e.g., Discord, Slack, etc.)
+                    out << "# Found Electron binary: " << electronBinaryPath << "\n";
+                    
+                    // Add Electron base directory to LD_LIBRARY_PATH for bundled libs
+                    out << "export LD_LIBRARY_PATH=\"${HERE}/" << appInfo.baseDir << ":${LD_LIBRARY_PATH}\"\n";
+                    
+                    // Change to the Electron app directory (important for proper execution)
+                    out << "cd \"${HERE}/" << appInfo.baseDir << "\"\n";
+                    
+                    // Find .asar file in base directory
+                    bool usedAsar = false;
+                    if (!appInfo.baseDir.isEmpty()) {
+                        QString fullBaseDirPath = QString("%1/%2").arg(appDirPath).arg(appInfo.baseDir);
+                        QDir baseDir(fullBaseDirPath);
+                        if (baseDir.exists()) {
+                            QStringList asarFiles = baseDir.entryList({"*.asar"}, QDir::Files);
+                            if (!asarFiles.isEmpty()) {
+                                QString asarFile = QString("%1/%2").arg(appInfo.baseDir).arg(asarFiles.first());
+                                out << "# Using .asar file: " << asarFile << "\n";
+                                out << "exec \"${HERE}/" << electronBinaryPath << "\" \"${HERE}/" << asarFile << "\" \"$@\"\n";
+                                usedAsar = true;
+                            }
+                        }
+                    }
+                    
+                    if (!usedAsar) {
+                        if (!binLauncherPath.isEmpty()) {
                             // Use bin launcher for VS Code/Codium style apps
                             out << "# Using bin launcher: " << binLauncherPath << "\n";
                             out << "exec \"${HERE}/" << binLauncherPath << "\" \"$@\"\n";
                         } else {
-                            // No .asar file found, use wrapper script but ensure HERE is exported
-                            out << "# No .asar file found, using wrapper script\n";
-                            out << "export HERE=\"${HERE}\"\n";
-                            out << "cd \"" << appInfo.workingDir << "\"\n";
-                            out << "exec \"${HERE}/" << relativePath << "\" \"$@\"\n";
+                            // No .asar file and no bin launcher - run Electron binary directly
+                            // This is common for Discord, Slack, etc.
+                            out << "# Running Electron binary directly (no .asar)\n";
+                            out << "exec \"${HERE}/" << electronBinaryPath << "\" \"$@\"\n";
                         }
-                    } else if (!binLauncherPath.isEmpty()) {
-                        // Electron binary not found but bin launcher exists (VS Code/Codium)
-                        out << "# Using bin launcher: " << binLauncherPath << "\n";
-                        out << "cd \"" << appInfo.workingDir << "\"\n";
-                        out << "exec \"${HERE}/" << binLauncherPath << "\" \"$@\"\n";
-                    } else {
-                        // Electron binary not found, use wrapper script
-                        out << "# Electron binary not found, using wrapper script\n";
-                        out << "export HERE=\"${HERE}\"\n";
-                        out << "cd \"" << appInfo.workingDir << "\"\n";
-                        out << "exec \"${HERE}/" << relativePath << "\" \"$@\"\n";
                     }
                 } else if (!binLauncherPath.isEmpty()) {
-                    // No Electron binary found but bin launcher exists (VS Code/Codium)
+                    // Electron binary not found but bin launcher exists (VS Code/Codium)
                     out << "# Using bin launcher: " << binLauncherPath << "\n";
-                    out << "cd \"" << appInfo.workingDir << "\"\n";
+                    if (!workingDir.isEmpty()) {
+                        out << "cd " << workingDir << "\n";
+                    }
                     out << "exec \"${HERE}/" << binLauncherPath << "\" \"$@\"\n";
                 } else {
-                    // No Electron binary found, use wrapper script but ensure HERE is exported
-                    out << "# No Electron binary found, using wrapper script\n";
+                    // Electron binary not found, use wrapper script
+                    out << "# Electron binary not found, using wrapper script\n";
                     out << "export HERE=\"${HERE}\"\n";
-                    out << "cd \"" << appInfo.workingDir << "\"\n";
+                    if (!workingDir.isEmpty()) {
+                        out << "cd " << workingDir << "\n";
+                    }
                     out << "exec \"${HERE}/" << relativePath << "\" \"$@\"\n";
                 }
             } else if (appInfo.type == AppType::Python) {
@@ -1496,7 +1591,19 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
                 // Native application - change to working directory if specified
                 // Always change directory for games and opt applications
                 if (!appInfo.workingDir.isEmpty()) {
-                    out << "cd \"" << appInfo.workingDir << "\"\n";
+                    QString workingDir = appInfo.workingDir;
+                    if (workingDir.contains("${HERE}")) {
+                        QString pathAfterHere = workingDir;
+                        pathAfterHere.replace("${HERE}/", "");
+                        if (!pathAfterHere.isEmpty()) {
+                            workingDir = QString("\"${HERE}/%1\"").arg(pathAfterHere);
+                        } else {
+                            workingDir = "\"${HERE}\"";
+                        }
+                    } else {
+                        workingDir = QString("\"%1\"").arg(workingDir);
+                    }
+                    out << "cd " << workingDir << "\n";
                 }
                 // Use absolute path from HERE for reliability
                 out << "exec \"${HERE}/" << relativePath << "\" \"$@\"\n";
@@ -1566,7 +1673,22 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
                     out << "export VSCODE_PATH=\"${HERE}/" << fallbackAppInfo.baseDir << "\"\n";
                     out << "unset ELECTRON_RUN_AS_NODE\n";
                 }
-                out << "cd \"" << fallbackAppInfo.workingDir << "\"\n";
+                // Determine working directory - replace ${HERE} with actual path
+                QString workingDir = fallbackAppInfo.workingDir;
+                if (workingDir.contains("${HERE}")) {
+                    QString pathAfterHere = workingDir;
+                    pathAfterHere.replace("${HERE}/", "");
+                    if (!pathAfterHere.isEmpty()) {
+                        workingDir = QString("\"${HERE}/%1\"").arg(pathAfterHere);
+                    } else {
+                        workingDir = "\"${HERE}\"";
+                    }
+                } else if (!workingDir.isEmpty()) {
+                    workingDir = QString("\"%1\"").arg(workingDir);
+                }
+                if (!workingDir.isEmpty()) {
+                    out << "cd " << workingDir << "\n";
+                }
                 out << "exec \"${HERE}/" << relativePath << "\" \"$@\"\n";
             } else if (fallbackAppInfo.type == AppType::Python) {
                 // Python application
@@ -1617,7 +1739,19 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
                 
                 // Change to working directory (important for relative imports)
                 if (!fallbackAppInfo.workingDir.isEmpty()) {
-                    out << "cd \"" << fallbackAppInfo.workingDir << "\"\n";
+                    QString workingDir = fallbackAppInfo.workingDir;
+                    if (workingDir.contains("${HERE}")) {
+                        QString pathAfterHere = workingDir;
+                        pathAfterHere.replace("${HERE}/", "");
+                        if (!pathAfterHere.isEmpty()) {
+                            workingDir = QString("\"${HERE}/%1\"").arg(pathAfterHere);
+                        } else {
+                            workingDir = "\"${HERE}\"";
+                        }
+                    } else {
+                        workingDir = QString("\"%1\"").arg(workingDir);
+                    }
+                    out << "cd " << workingDir << "\n";
                 }
                 
                 // Determine Python script path
@@ -1670,15 +1804,41 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
             } else {
                 // Always change directory for games and opt applications
                 if (!fallbackAppInfo.workingDir.isEmpty()) {
-                    out << "cd \"" << fallbackAppInfo.workingDir << "\"\n";
+                    QString workingDir = fallbackAppInfo.workingDir;
+                    if (workingDir.contains("${HERE}")) {
+                        QString pathAfterHere = workingDir;
+                        pathAfterHere.replace("${HERE}/", "");
+                        if (!pathAfterHere.isEmpty()) {
+                            workingDir = QString("\"${HERE}/%1\"").arg(pathAfterHere);
+                        } else {
+                            workingDir = "\"${HERE}\"";
+                        }
+                    } else {
+                        workingDir = QString("\"%1\"").arg(workingDir);
+                    }
+                    out << "cd " << workingDir << "\n";
                 }
                 out << "exec \"${HERE}/" << relativePath << "\" \"$@\"\n";
             }
         }
     }
     
+    // Flush and close the file explicitly before setting executable
+    out.flush();
     file.close();
     
-    return SubprocessWrapper::setExecutable(appRunPath);
+    // Verify file was written successfully
+    if (!QFileInfo::exists(appRunPath)) {
+        qWarning() << "AppRun file was not created:" << appRunPath;
+        return false;
+    }
+    
+    // Set executable permissions
+    bool result = SubprocessWrapper::setExecutable(appRunPath);
+    if (!result) {
+        qWarning() << "Failed to set executable permissions on AppRun:" << appRunPath;
+    }
+    
+    return result;
 }
 

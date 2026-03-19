@@ -1,0 +1,59 @@
+name: Build ARM64 AppImage
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+  release:
+    types: [created]
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ARM64 AppImage
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            ubuntu:22.04 bash -c "
+              apt-get update && \
+              apt-get install -y build-essential cmake qt6-base-dev qt6-base-dev-tools wget file && \
+              chmod +x packaging/build-appimage-arm64.sh && \
+              ./packaging/build-appimage-arm64.sh
+            "
+
+      - name: Upload ARM64 AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: AppAlchemist-ARM64
+          path: releases/AppAlchemist-ARM64.AppImage
+          retention-days: 30
+
+      - name: Upload to Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: releases/AppAlchemist-ARM64.AppImage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
+
+
+
+
+
+

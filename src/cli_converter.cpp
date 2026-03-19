@@ -263,6 +263,73 @@ QString CliConverter::determineAppImagePath(const QString& packagePath, const QS
     return CacheManager::getAppImagePath(packagePath);
 }
 
+int CliConverter::convertBatch(const QStringList& packagePaths, const QString& outputDir, bool autoLaunch) {
+    if (packagePaths.isEmpty()) {
+        logToFile("ERROR: No packages provided for batch conversion");
+        return 1;
+    }
+    
+    logToFile(QString("=== Starting batch conversion of %1 packages ===").arg(packagePaths.size()));
+    sendNotification("AppAlchemist", QString("Starting batch conversion of %1 packages...").arg(packagePaths.size()), "normal");
+    
+    int successCount = 0;
+    int failCount = 0;
+    QStringList successfulPaths;
+    QStringList failedPaths;
+    
+    for (int i = 0; i < packagePaths.size(); ++i) {
+        const QString& packagePath = packagePaths[i];
+        QFileInfo info(packagePath);
+        
+        logToFile(QString("=== [%1/%2] Converting: %3 ===")
+            .arg(i + 1).arg(packagePaths.size()).arg(info.fileName()));
+        
+        // Don't auto-launch during batch - launch all at the end or not at all
+        int result = convert(packagePath, outputDir, false);
+        
+        if (result == 0) {
+            successCount++;
+            if (!m_resultAppImagePath.isEmpty()) {
+                successfulPaths.append(m_resultAppImagePath);
+            }
+            logToFile(QString("  SUCCESS: %1").arg(info.fileName()));
+        } else {
+            failCount++;
+            failedPaths.append(info.fileName());
+            logToFile(QString("  FAILED: %1").arg(info.fileName()));
+        }
+    }
+    
+    logToFile(QString("=== Batch conversion complete: %1 succeeded, %2 failed ===")
+        .arg(successCount).arg(failCount));
+    
+    // Send summary notification
+    if (failCount == 0) {
+        sendNotification("AppAlchemist", 
+            QString("Batch complete: All %1 packages converted successfully").arg(successCount), 
+            "normal");
+    } else if (successCount == 0) {
+        sendNotification("AppAlchemist Error", 
+            QString("Batch failed: All %1 packages failed to convert").arg(failCount), 
+            "error");
+    } else {
+        sendNotification("AppAlchemist", 
+            QString("Batch complete: %1 succeeded, %2 failed").arg(successCount).arg(failCount), 
+            "normal");
+    }
+    
+    // Launch successfully converted AppImages if requested
+    if (autoLaunch && !successfulPaths.isEmpty()) {
+        logToFile(QString("Launching %1 converted AppImages...").arg(successfulPaths.size()));
+        for (const QString& appImagePath : successfulPaths) {
+            launchAppImage(appImagePath);
+            QThread::msleep(500); // Small delay between launches
+        }
+    }
+    
+    return (failCount > 0) ? 1 : 0;
+}
+
 void CliConverter::onProgress(int percentage, const QString& message) {
     QString logMsg = QString("[%1%] %2").arg(percentage).arg(message);
     logToFile(logMsg);

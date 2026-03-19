@@ -23,6 +23,10 @@ public:
     // Returns exit code: 0 on success, 1 on error
     int convert(const QString& packagePath, const QString& outputDir = QString(), bool autoLaunch = true);
     
+    // Batch convert multiple packages
+    // Returns exit code: 0 if all succeeded, 1 if any failed
+    int convertBatch(const QStringList& packagePaths, const QString& outputDir = QString(), bool autoLaunch = false);
+    
     // Send system notification
     static void sendNotification(const QString& title, const QString& message, const QString& urgency = "normal");
 

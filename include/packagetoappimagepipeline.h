@@ -6,13 +6,17 @@
 #include <QThread>
 #include "debparser.h"
 #include "rpmparser.h"
+#include "tarballparser.h"
 #include "dependencyanalyzer.h"
 #include "appdirbuilder.h"
 #include "appimagebuilder.h"
+#include "size_optimizer.h"
+#include "dependency_resolver.h"
 
 enum class PackageType {
     DEB,
     RPM,
+    TARBALL,
     UNKNOWN
 };
 
@@ -25,6 +29,11 @@ public:
     
     void setPackagePath(const QString& packagePath);
     void setOutputPath(const QString& outputPath);
+    void setOptimizationSettings(const OptimizationSettings& settings);
+    OptimizationSettings optimizationSettings() const;
+    void setDependencySettings(const DependencySettings& settings);
+    DependencySettings dependencySettings() const;
+    void setSudoPassword(const QString& password);
     void start();
     void cancel();
 
@@ -55,9 +64,14 @@ private:
     
     DebParser* m_debParser;
     RpmParser* m_rpmParser;
+    TarballParser* m_tarballParser;
     DependencyAnalyzer* m_analyzer;
     AppDirBuilder* m_appDirBuilder;
     AppImageBuilder* m_appImageBuilder;
+    SizeOptimizer* m_sizeOptimizer;
+    DependencyResolver* m_dependencyResolver;
+    OptimizationSettings m_optimizationSettings;
+    DependencySettings m_dependencySettings;
     
     PackageMetadata m_metadata;
     QStringList m_libraries;

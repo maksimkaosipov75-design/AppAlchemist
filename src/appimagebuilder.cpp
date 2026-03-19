@@ -170,8 +170,14 @@ bool AppImageBuilder::downloadAppImageTool() {
     qDebug() << "Downloading appimagetool from GitHub...";
     
     // Download appimagetool from GitHub releases
-    // Latest stable version URL
-    QString downloadUrl = "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage";
+    // Detect architecture and use appropriate version
+    QString arch = detectSystemArchitecture();
+    QString downloadUrl;
+    if (arch == "aarch64") {
+        downloadUrl = "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-aarch64.AppImage";
+    } else {
+        downloadUrl = "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage";
+    }
     
     QNetworkAccessManager manager;
     QUrl url(downloadUrl);
@@ -263,7 +269,8 @@ bool AppImageBuilder::buildAppImage(const QString& appDirPath, const QString& ou
     
     // Set ARCH environment variable (required by appimagetool)
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    env.insert("ARCH", "x86_64");
+    QString arch = detectSystemArchitecture();
+    env.insert("ARCH", arch);
     
     // Build arguments - add -n flag if compression is disabled
     QStringList args;
@@ -271,6 +278,11 @@ bool AppImageBuilder::buildAppImage(const QString& appDirPath, const QString& ou
         args << "-n";
         emit log("Building AppImage without compression (faster)");
     }
+
+    // Add --no-appstream flag to skip strict AppStream validation
+    // Many packages have invalid AppStream metadata that prevents AppImage creation
+    args << "--no-appstream";
+
     args << appDirPath << outputPath;
     
     ProcessResult result = SubprocessWrapper::execute(

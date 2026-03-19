@@ -28,3 +28,11 @@ cd arch && makepkg -si
 
 
 
+
+
+
+
+
+
+
+
