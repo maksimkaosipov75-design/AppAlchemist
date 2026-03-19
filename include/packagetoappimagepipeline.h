@@ -53,6 +53,8 @@ private:
     bool resolveAppDirDependencies(const QString& executablePath, const QString& stageLabel, bool requiredForSuccess);
     bool optimizeBuiltAppDir(const QString& stageLabel);
     bool packageBuiltAppDir(const QString& stageLabel);
+    bool probeAppDirRuntime(const QString& stageLabel, bool requiredForSuccess);
+    bool probeAppRunSyntax(const QString& appRunPath) const;
     QString findPrimaryAppDirExecutable() const;
     QStringList findMissingRuntimeLibraries(const QString& executablePath) const;
 

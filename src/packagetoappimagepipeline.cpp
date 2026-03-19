@@ -267,6 +267,14 @@ bool PackageToAppImagePipeline::executeFastPath() {
         return false;
     }
 
+    if (!probeAppDirRuntime("Fast path", m_packageProfile.applicationProfile == ApplicationProfile::NativeCli)) {
+        return false;
+    }
+
+    if (m_cancelled) {
+        return false;
+    }
+
     if (!packageBuiltAppDir("Fast path")) {
         return false;
     }
@@ -313,6 +321,14 @@ bool PackageToAppImagePipeline::executeRepairPath() {
     }
 
     if (!optimizeBuiltAppDir("Repair path")) {
+        return false;
+    }
+
+    if (m_cancelled) {
+        return false;
+    }
+
+    if (!probeAppDirRuntime("Repair path", false)) {
         return false;
     }
 
@@ -369,6 +385,14 @@ bool PackageToAppImagePipeline::executeFallbackPath() {
 
     if (!optimizeBuiltAppDir("Fallback path")) {
         return false;
+    }
+
+    if (m_cancelled) {
+        return false;
+    }
+
+    if (!probeAppDirRuntime("Fallback path", false)) {
+        emit log("WARNING: Fallback runtime probe reported issues, continuing to package anyway");
     }
 
     if (m_cancelled) {
@@ -469,6 +493,89 @@ bool PackageToAppImagePipeline::packageBuiltAppDir(const QString& stageLabel) {
     if (!buildAppImage()) {
         emit log(QString("%1 failed while building AppImage.").arg(stageLabel));
         return false;
+    }
+
+    return true;
+}
+
+bool PackageToAppImagePipeline::probeAppDirRuntime(const QString& stageLabel, bool requiredForSuccess) {
+    const QString appRunPath = QDir(m_appDirPath).absoluteFilePath("AppRun");
+    if (!QFileInfo::exists(appRunPath)) {
+        emit log(QString("%1 runtime probe skipped: AppRun is missing.").arg(stageLabel));
+        return !requiredForSuccess;
+    }
+
+    if (!probeAppRunSyntax(appRunPath)) {
+        emit log(QString("%1 runtime probe failed: AppRun syntax check failed.").arg(stageLabel));
+        return !requiredForSuccess ? false : false;
+    }
+
+    if (m_packageProfile.applicationProfile != ApplicationProfile::NativeCli &&
+        m_packageProfile.applicationProfile != ApplicationProfile::Script) {
+        emit log(QString("%1 runtime probe: syntax check passed; live probe skipped for non-CLI profile.")
+                 .arg(stageLabel));
+        return true;
+    }
+
+    emit progress(80, "Running AppDir probe...");
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert("APPDIR", m_appDirPath);
+    env.insert("HERE", m_appDirPath);
+    env.insert("LD_LIBRARY_PATH", QString("%1/usr/lib:%2").arg(m_appDirPath, env.value("LD_LIBRARY_PATH")));
+    env.insert("PATH", QString("%1/usr/bin:%2/usr/sbin:%3/usr/games:%4")
+               .arg(m_appDirPath, m_appDirPath, m_appDirPath, env.value("PATH")));
+    env.insert("NO_AT_BRIDGE", "1");
+
+    const ProcessResult probeResult = SubprocessWrapper::execute(
+        appRunPath,
+        {"--help"},
+        m_appDirPath,
+        2000,
+        env);
+
+    if (probeResult.success) {
+        emit log(QString("%1 runtime probe passed.").arg(stageLabel));
+        return true;
+    }
+
+    const QString combinedOutput = probeResult.stderrOutput + "\n" + probeResult.stdoutOutput;
+    const bool looksHealthy = combinedOutput.contains("Usage", Qt::CaseInsensitive)
+        || combinedOutput.contains("help", Qt::CaseInsensitive)
+        || combinedOutput.contains("version", Qt::CaseInsensitive);
+
+    if (looksHealthy) {
+        emit log(QString("%1 runtime probe produced non-zero exit but returned recognizable help output.")
+                 .arg(stageLabel));
+        return true;
+    }
+
+    emit log(QString("%1 runtime probe failed: %2").arg(
+        stageLabel,
+        probeResult.errorMessage.isEmpty() ? QString("unknown error") : probeResult.errorMessage));
+
+    return !requiredForSuccess;
+}
+
+bool PackageToAppImagePipeline::probeAppRunSyntax(const QString& appRunPath) const {
+    QFile file(appRunPath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return false;
+    }
+
+    const QByteArray firstLine = file.readLine();
+    file.close();
+
+    if (!firstLine.startsWith("#!")) {
+        return true;
+    }
+
+    if (firstLine.contains("sh") || firstLine.contains("bash")) {
+        const ProcessResult syntaxResult = SubprocessWrapper::execute(
+            "/bin/sh",
+            {"-n", appRunPath},
+            {},
+            5000);
+        return syntaxResult.success;
     }
 
     return true;
