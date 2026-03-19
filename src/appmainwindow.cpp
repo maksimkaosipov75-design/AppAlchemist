@@ -859,7 +859,7 @@ bool AppMainWindow::eventFilter(QObject* obj, QEvent* event) {
             QString filePath = QFileDialog::getOpenFileName(this, 
                 "Select package file", 
                 QDir::homePath(),
-                "All supported (*.deb *.rpm *.tar.gz *.tgz *.tar.xz *.txz *.tar.bz2 *.tar.zst *.zip *.tar);;"
+                "All supported (*.deb *.rpm *.tar.gz *.tgz *.tar.xz *.txz *.tar.bz2 *.tar.zst *.tar.bin *.zip *.tar);;"
                 "Debian packages (*.deb);;RPM packages (*.rpm);;" + TarballParser::getFileFilter());
             if (!filePath.isEmpty()) {
                 setPackageFile(filePath);

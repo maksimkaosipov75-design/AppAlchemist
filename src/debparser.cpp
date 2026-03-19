@@ -96,6 +96,8 @@ bool DebParser::extractDeb(const QString& debPath, const QString& extractDir) {
         tarArgs = {"-xJf", dataTar, "-C", extractPath};
     } else if (dataTar.endsWith(".bz2")) {
         tarArgs = {"-xjf", dataTar, "-C", extractPath};
+    } else if (dataTar.endsWith(".zst") || dataTar.endsWith(".zstd")) {
+        tarArgs = {"--zstd", "-xf", dataTar, "-C", extractPath};
     } else {
         tarArgs = {"-xf", dataTar, "-C", extractPath};
     }
@@ -121,6 +123,8 @@ bool DebParser::extractDeb(const QString& debPath, const QString& extractDir) {
             controlTarArgs = {"-xJf", controlTar, "-C", controlPath};
         } else if (controlTar.endsWith(".bz2")) {
             controlTarArgs = {"-xjf", controlTar, "-C", controlPath};
+        } else if (controlTar.endsWith(".zst") || controlTar.endsWith(".zstd")) {
+            controlTarArgs = {"--zstd", "-xf", controlTar, "-C", controlPath};
         } else {
             controlTarArgs = {"-xf", controlTar, "-C", controlPath};
         }
@@ -273,9 +277,16 @@ DebMetadata DebParser::parseMetadata(const QString& extractDir) {
         if (filteredExecutables.isEmpty()) {
             filteredExecutables = metadata.executables;
         }
+
+        if (!metadata.desktopExecCommand.isEmpty()) {
+            metadata.mainExecutable = resolveExecutableFromCommand(metadata.desktopExecCommand, filteredExecutables);
+        }
         
         // Prefer executable with same name as package
         for (const QString& exec : filteredExecutables) {
+            if (!metadata.mainExecutable.isEmpty()) {
+                break;
+            }
             QFileInfo execInfo(exec);
             QString baseName = execInfo.baseName().toLower();
             QString packageName = metadata.package.toLower();
@@ -365,7 +376,8 @@ QStringList DebParser::findExecutables(const QString& extractDir) {
         QString("%1/sbin").arg(extractDir),
         QString("%1/usr/games").arg(extractDir),
         QString("%1/usr/lib").arg(extractDir),
-        QString("%1/usr/libexec").arg(extractDir)
+        QString("%1/usr/libexec").arg(extractDir),
+        QString("%1/usr/share").arg(extractDir)
     };
     
     for (const QString& dir : searchDirs) {
@@ -491,6 +503,7 @@ QString DebParser::parseDesktopFile(const QString& desktopPath, DebMetadata& met
             // Remove %f, %F, %u, %U, %i, %c, %k, %d, %D, %n, %N, %v, %m
             execCommand.remove(QRegularExpression("%[fFuUicckdDnNvm]"));
             execCommand = execCommand.trimmed();
+            metadata.desktopExecCommand = execCommand;
         } else if (line.startsWith("Icon=")) {
             iconName = line.mid(5).trimmed();
         } else if (line.startsWith("Name=") && metadata.description.isEmpty()) {
@@ -499,6 +512,15 @@ QString DebParser::parseDesktopFile(const QString& desktopPath, DebMetadata& met
     }
     
     file.close();
+
+    QString dataDir;
+    int dataPos = desktopPath.indexOf("/data/");
+    if (dataPos >= 0) {
+        dataDir = desktopPath.left(dataPos + 5);
+    }
+    if (dataDir.isEmpty()) {
+        dataDir = QFileInfo(desktopPath).absolutePath();
+    }
     
     // If Exec contains java or jar, it's a Java application
     if (execCommand.contains("java") || execCommand.contains(".jar")) {
@@ -509,7 +531,6 @@ QString DebParser::parseDesktopFile(const QString& desktopPath, DebMetadata& met
             QString jarPath = match.captured(1);
             // Resolve relative paths
             if (jarPath.startsWith("/")) {
-                QString dataDir = QString("%1/data").arg(QFileInfo(desktopPath).absolutePath().section('/', 0, -3));
                 QString fullJarPath = QString("%1%2").arg(dataDir).arg(jarPath);
                 if (QFileInfo::exists(fullJarPath)) {
                     metadata.mainExecutable = fullJarPath;
@@ -517,11 +538,11 @@ QString DebParser::parseDesktopFile(const QString& desktopPath, DebMetadata& met
                 }
             } else {
                 // Try to find jar in common locations
-                QString dataDir = QString("%1/data").arg(QFileInfo(desktopPath).absolutePath().section('/', 0, -3));
                 QStringList searchPaths = {
                     QString("%1/usr/games/%2").arg(dataDir).arg(jarPath),
                     QString("%1/opt/%2").arg(dataDir).arg(jarPath),
-                    QString("%1/usr/lib/%2").arg(dataDir).arg(jarPath)
+                    QString("%1/usr/lib/%2").arg(dataDir).arg(jarPath),
+                    QString("%1/usr/share/%2").arg(dataDir).arg(jarPath)
                 };
                 for (const QString& path : searchPaths) {
                     if (QFileInfo::exists(path)) {
@@ -534,7 +555,6 @@ QString DebParser::parseDesktopFile(const QString& desktopPath, DebMetadata& met
         }
     } else if (!execCommand.isEmpty()) {
         // Regular executable
-        QString dataDir = QString("%1/data").arg(QFileInfo(desktopPath).absolutePath().section('/', 0, -3));
         QString execPath = execCommand.split(' ').first();
         if (execPath.startsWith("/")) {
             QString fullPath = QString("%1%2").arg(dataDir).arg(execPath);
@@ -547,7 +567,8 @@ QString DebParser::parseDesktopFile(const QString& desktopPath, DebMetadata& met
             QStringList searchPaths = {
                 QString("%1/usr/bin/%2").arg(dataDir).arg(execPath),
                 QString("%1/usr/sbin/%2").arg(dataDir).arg(execPath),
-                QString("%1/bin/%2").arg(dataDir).arg(execPath)
+                QString("%1/bin/%2").arg(dataDir).arg(execPath),
+                QString("%1/usr/share/%2").arg(dataDir).arg(execPath)
             };
             for (const QString& path : searchPaths) {
                 if (QFileInfo::exists(path)) {
@@ -561,7 +582,6 @@ QString DebParser::parseDesktopFile(const QString& desktopPath, DebMetadata& met
     
     // Find icon if specified
     if (!iconName.isEmpty() && metadata.iconPath.isEmpty()) {
-        QString dataDir = QString("%1/data").arg(QFileInfo(desktopPath).absolutePath().section('/', 0, -3));
         QStringList iconPaths = {
             QString("%1/usr/share/pixmaps/%2").arg(dataDir).arg(iconName),
             QString("%1/usr/share/icons/%2").arg(dataDir).arg(iconName),
@@ -631,8 +651,11 @@ QStringList DebParser::searchInDirectory(const QString& dir, const QStringList& 
     }
     
     for (const QString& pattern : patterns) {
-        QFileInfoList entries = dirObj.entryInfoList({pattern}, 
-            QDir::Files | QDir::Executable, QDir::Name);
+        QFileInfoList entries = dirObj.entryInfoList(
+            {pattern},
+            QDir::Files | (executableOnly ? QDir::Executable : QDir::Files),
+            QDir::Name
+        );
         
         for (const QFileInfo& entry : entries) {
             if (!executableOnly || entry.isExecutable()) {
@@ -649,4 +672,3 @@ QStringList DebParser::searchInDirectory(const QString& dir, const QStringList& 
     
     return results;
 }
-

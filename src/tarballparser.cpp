@@ -35,6 +35,8 @@ TarballType TarballParser::getTarballType(const QString& tarballPath) {
         return TarballType::TAR_BZ2;
     } else if (lower.endsWith(".tar.zst") || lower.endsWith(".tzst")) {
         return TarballType::TAR_ZSTD;
+    } else if (lower.endsWith(".tar.bin")) {
+        return TarballType::TAR_BIN;
     } else if (lower.endsWith(".zip")) {
         return TarballType::ZIP;
     } else if (lower.endsWith(".tar")) {
@@ -49,11 +51,12 @@ bool TarballParser::isSupportedTarball(const QString& filePath) {
 }
 
 QString TarballParser::getFileFilter() {
-    return "Archives (*.tar.gz *.tgz *.tar.xz *.txz *.tar.bz2 *.tbz2 *.tar.zst *.zip *.tar);;"
+    return "Archives (*.tar.gz *.tgz *.tar.xz *.txz *.tar.bz2 *.tbz2 *.tar.zst *.tar.bin *.zip *.tar);;"
            "Gzip archives (*.tar.gz *.tgz);;"
            "XZ archives (*.tar.xz *.txz);;"
            "Bzip2 archives (*.tar.bz2 *.tbz2);;"
            "Zstd archives (*.tar.zst);;"
+           "Tar bin archives (*.tar.bin);;"
            "ZIP archives (*.zip);;"
            "Tar archives (*.tar)";
 }
@@ -65,6 +68,7 @@ bool TarballParser::validateTarball(const QString& tarballPath) {
     }
     
     m_type = getTarballType(tarballPath);
+    m_sourcePath = tarballPath;
     if (m_type == TarballType::UNKNOWN) {
         return false;
     }
@@ -109,6 +113,9 @@ bool TarballParser::validateTarball(const QString& tarballPath) {
         case TarballType::ZIP:
             // ZIP magic: 'P' 'K' 0x03 0x04 or 'P' 'K' 0x05 0x06 (empty) or 'P' 'K' 0x07 0x08 (spanned)
             return header.size() >= 4 && header[0] == 'P' && header[1] == 'K';
+
+        case TarballType::TAR_BIN:
+            return true;
         
         case TarballType::TAR:
             // Tar files have magic "ustar" at offset 257, but checking is complex
@@ -186,6 +193,9 @@ bool TarballParser::extractTarball(const QString& tarballPath, const QString& ex
             break;
         case TarballType::TAR_ZSTD:
             success = extractTar(tarballPath, dataDir, "zstd");
+            break;
+        case TarballType::TAR_BIN:
+            success = extractTar(tarballPath, dataDir, "");
             break;
         case TarballType::ZIP:
             success = extractZip(tarballPath, dataDir);
@@ -340,6 +350,7 @@ QString TarballParser::parseDesktopFile(const QString& desktopPath, PackageMetad
             execCommand = line.mid(5).trimmed();
             execCommand.remove(QRegularExpression("%[fFuUicckdDnNvm]"));
             execCommand = execCommand.trimmed();
+            metadata.desktopExecCommand = execCommand;
         } else if (line.startsWith("Icon=")) {
             iconName = line.mid(5).trimmed();
         } else if (line.startsWith("Name=") && metadata.package.isEmpty()) {
@@ -491,7 +502,7 @@ QStringList TarballParser::findExecutables(const QString& extractDir) {
             filePath.contains("/locale/") || filePath.contains("/locales/") ||
             fileName.endsWith(".so") || fileName.endsWith(".a") ||
             fileName.endsWith(".la") || fileName.endsWith(".pak") ||
-            fileName.endsWith(".dat") || fileName.endsWith(".bin") ||
+            fileName.endsWith(".dat") ||
             fileName.endsWith(".json") || fileName.endsWith(".txt") ||
             fileName.endsWith(".md") || fileName.endsWith(".html") ||
             fileName == "chrome-sandbox" || fileName.contains("crashpad")) {
@@ -644,12 +655,12 @@ PackageMetadata TarballParser::parseMetadata(const QString& extractDir) {
     // Guess package name if not found
     if (metadata.package.isEmpty()) {
         // Use parent directory name or tarball name
-        metadata.package = guessPackageName(m_tempDir, extractDir);
+        metadata.package = guessPackageName(m_sourcePath.isEmpty() ? m_tempDir : m_sourcePath, extractDir);
     }
     
     // Guess version if not found
     if (metadata.version.isEmpty()) {
-        metadata.version = guessVersion(m_tempDir, extractDir);
+        metadata.version = guessVersion(m_sourcePath.isEmpty() ? m_tempDir : m_sourcePath, extractDir);
     }
     
     // Determine main executable
@@ -676,9 +687,16 @@ PackageMetadata TarballParser::parseMetadata(const QString& extractDir) {
         if (filteredExecutables.isEmpty()) {
             filteredExecutables = metadata.executables;
         }
+
+        if (!metadata.desktopExecCommand.isEmpty()) {
+            metadata.mainExecutable = resolveExecutableFromCommand(metadata.desktopExecCommand, filteredExecutables);
+        }
         
         // Prefer executable with same name as package
         for (const QString& exec : filteredExecutables) {
+            if (!metadata.mainExecutable.isEmpty()) {
+                break;
+            }
             QFileInfo execInfo(exec);
             QString fileName = execInfo.fileName().toLower();
             
@@ -698,5 +716,4 @@ PackageMetadata TarballParser::parseMetadata(const QString& extractDir) {
     
     return metadata;
 }
-
 

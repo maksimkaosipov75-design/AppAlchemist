@@ -268,9 +268,16 @@ PackageMetadata RpmParser::parseMetadata(const QString& extractDir) {
         if (filteredExecutables.isEmpty()) {
             filteredExecutables = metadata.executables;
         }
+
+        if (!metadata.desktopExecCommand.isEmpty()) {
+            metadata.mainExecutable = resolveExecutableFromCommand(metadata.desktopExecCommand, filteredExecutables);
+        }
         
         // Prefer executable with same name as package
         for (const QString& exec : filteredExecutables) {
+            if (!metadata.mainExecutable.isEmpty()) {
+                break;
+            }
             QFileInfo execInfo(exec);
             QString baseName = execInfo.baseName().toLower();
             QString packageName = metadata.package.toLower();
@@ -485,7 +492,9 @@ QStringList RpmParser::findExecutables(const QString& extractDir) {
                 fileName.endsWith(".appdata.xml") ||
                 fileName.endsWith(".xml") ||
                 fileName.endsWith(".pak") ||
-                fileName.endsWith(".bin") && !fileName.contains("snapshot") && !fileName.contains("v8")) {
+                (fileName.endsWith(".bin") && !execInfo.isExecutable() &&
+                 !isElfExecutable(exec) && !isScriptFile(exec) &&
+                 !fileName.contains("snapshot") && !fileName.contains("v8"))) {
                 continue;
             }
             
@@ -611,6 +620,7 @@ QString RpmParser::parseDesktopFile(const QString& desktopPath, PackageMetadata&
             execCommand = line.mid(5).trimmed();
             execCommand.remove(QRegularExpression("%[fFuUicckdDnNvm]"));
             execCommand = execCommand.trimmed();
+            metadata.desktopExecCommand = execCommand;
         } else if (line.startsWith("Icon=")) {
             iconName = line.mid(5).trimmed();
         } else if (line.startsWith("Name=") && metadata.description.isEmpty()) {
@@ -720,4 +730,3 @@ QStringList RpmParser::findJavaApplications(const QString& extractDir) {
     
     return jarFiles;
 }
-

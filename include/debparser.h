@@ -15,6 +15,7 @@ struct PackageMetadata {
     QStringList scripts;  // postinst, prerm, etc.
     QString iconPath;
     QString mainExecutable;
+    QString desktopExecCommand;
     QString desktopFileContent; // For Java apps
     QString javaMainClass;      // For Java apps
     QString javaJarPath;        // For Java apps
@@ -45,4 +46,3 @@ private:
 };
 
 #endif // DEBPARSER_H
-

@@ -11,6 +11,7 @@ enum class TarballType {
     TAR_XZ,     // .tar.xz, .txz
     TAR_BZ2,    // .tar.bz2, .tbz2
     TAR_ZSTD,   // .tar.zst
+    TAR_BIN,    // .tar.bin
     ZIP,        // .zip
     TAR,        // .tar (uncompressed)
     UNKNOWN
@@ -49,6 +50,7 @@ public:
 
 private:
     QString m_tempDir;
+    QString m_sourcePath;
     TarballType m_type;
     TarballStructure m_structure;
     
@@ -76,5 +78,4 @@ private:
 };
 
 #endif // TARBALLPARSER_H
-
 

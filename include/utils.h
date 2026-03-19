@@ -40,6 +40,7 @@ public:
 
 // Architecture detection utility
 QString detectSystemArchitecture();
+QString extractDesktopExecBinary(const QString& execCommand);
+QString resolveExecutableFromCommand(const QString& execCommand, const QStringList& executables);
 
 #endif // UTILS_H
-

@@ -6,6 +6,30 @@
 #include <QStandardPaths>
 #include <QThread>
 #include <QDebug>
+#include <QRegularExpression>
+
+namespace {
+QString stripQuotes(QString value) {
+    if (value.size() >= 2) {
+        const QChar first = value.front();
+        const QChar last = value.back();
+        if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+            value = value.mid(1, value.size() - 2);
+        }
+    }
+    return value;
+}
+
+bool recreateSymlink(const QFileInfo& sourceInfo, const QString& destination) {
+    const QString target = sourceInfo.symLinkTarget();
+    if (target.isEmpty()) {
+        return false;
+    }
+
+    QFile::remove(destination);
+    return QFile::link(target, destination);
+}
+}
 
 ProcessResult SubprocessWrapper::execute(const QString& command, 
                                          const QStringList& arguments,
@@ -71,8 +95,21 @@ bool SubprocessWrapper::copyFile(const QString& source, const QString& destinati
     if (!destDir.exists()) {
         destDir.mkpath(".");
     }
-    
-    return QFile::copy(source, destination);
+
+    if (QFileInfo::exists(destination) || QFileInfo(destination).isSymLink()) {
+        QFile::remove(destination);
+    }
+
+    if (sourceInfo.isSymLink()) {
+        return recreateSymlink(sourceInfo, destination);
+    }
+
+    if (!QFile::copy(source, destination)) {
+        return false;
+    }
+
+    QFile(destination).setPermissions(sourceInfo.permissions());
+    return true;
 }
 
 bool SubprocessWrapper::copyDirectory(const QString& source, const QString& destination) {
@@ -90,24 +127,29 @@ bool SubprocessWrapper::copyDirectory(const QString& source, const QString& dest
         }
     }
     
-    // Use QDir::NoSymLinks to avoid copying symlinks
-    QStringList files = sourceDir.entryList(QDir::Files | QDir::NoSymLinks);
-    for (const QString& file : files) {
-        QString srcPath = sourceDir.absoluteFilePath(file);
-        QString destPath = destDir.absoluteFilePath(file);
-        if (!QFile::copy(srcPath, destPath)) {
-            qWarning() << "Failed to copy file:" << srcPath << "to" << destPath;
-            // Continue with other files instead of failing completely
+    const QFileInfoList entries = sourceDir.entryInfoList(
+        QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot
+    );
+    for (const QFileInfo& entry : entries) {
+        const QString srcPath = entry.absoluteFilePath();
+        const QString destPath = destDir.absoluteFilePath(entry.fileName());
+
+        if (entry.isSymLink()) {
+            if (!copyFile(srcPath, destPath)) {
+                qWarning() << "Failed to copy symlink:" << srcPath << "to" << destPath;
+            }
+            continue;
         }
-    }
-    
-    QStringList dirs = sourceDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks);
-    for (const QString& dir : dirs) {
-        QString srcPath = sourceDir.absoluteFilePath(dir);
-        QString destPath = destDir.absoluteFilePath(dir);
-        if (!copyDirectory(srcPath, destPath)) {
-            qWarning() << "Failed to copy subdirectory:" << srcPath;
-            // Continue with other directories
+
+        if (entry.isDir()) {
+            if (!copyDirectory(srcPath, destPath)) {
+                qWarning() << "Failed to copy subdirectory:" << srcPath;
+            }
+            continue;
+        }
+
+        if (!copyFile(srcPath, destPath)) {
+            qWarning() << "Failed to copy file:" << srcPath << "to" << destPath;
         }
     }
     
@@ -171,6 +213,10 @@ bool SubprocessWrapper::createHardLink(const QString& source, const QString& des
             return false;
         }
     }
+
+    if (QFileInfo::exists(destination) || QFileInfo(destination).isSymLink()) {
+        QFile::remove(destination);
+    }
     
     // Try to create hardlink using link() system call
     // If hardlink fails (e.g., cross-filesystem), fall back to copy
@@ -202,6 +248,77 @@ QString detectSystemArchitecture() {
         return "x86_64";
     }
     return "x86_64"; // Default fallback
+}
+
+QString extractDesktopExecBinary(const QString& execCommand) {
+    QString cleaned = execCommand.trimmed();
+    cleaned.remove(QRegularExpression("%[fFuUdDnNickvm]"));
+    cleaned = cleaned.trimmed();
+
+    const QRegularExpression tokenRegex(R"((\"[^\"]*\"|'[^']*'|\S+))");
+    auto it = tokenRegex.globalMatch(cleaned);
+    bool skipNext = false;
+
+    while (it.hasNext()) {
+        QString token = stripQuotes(it.next().captured(1));
+        if (token.isEmpty()) {
+            continue;
+        }
+
+        if (skipNext) {
+            skipNext = false;
+            continue;
+        }
+
+        if (token == "env") {
+            continue;
+        }
+
+        if (token == "-S") {
+            skipNext = true;
+            continue;
+        }
+
+        if (token.contains('=') && !token.startsWith('/') && !token.startsWith("./") && !token.startsWith("../")) {
+            continue;
+        }
+
+        if (token == "sh" || token == "bash" || token == "/bin/sh" || token == "/bin/bash" ||
+            token == "python" || token == "python3" || token == "/usr/bin/python" ||
+            token == "/usr/bin/python3" || token == "java" || token == "/usr/bin/java") {
+            continue;
+        }
+
+        return token;
+    }
+
+    return QString();
+}
+
+QString resolveExecutableFromCommand(const QString& execCommand, const QStringList& executables) {
+    const QString token = extractDesktopExecBinary(execCommand);
+    if (token.isEmpty()) {
+        return QString();
+    }
+
+    const QFileInfo tokenInfo(token);
+    const QString tokenName = tokenInfo.fileName().toLower();
+    const QString tokenBaseName = tokenInfo.baseName().toLower();
+
+    for (const QString& exec : executables) {
+        const QFileInfo execInfo(exec);
+        if (exec == token || exec.endsWith(token)) {
+            return exec;
+        }
+
+        const QString execName = execInfo.fileName().toLower();
+        const QString execBaseName = execInfo.baseName().toLower();
+        if (execName == tokenName || execBaseName == tokenBaseName) {
+            return exec;
+        }
+    }
+
+    return QString();
 }
 
 ProcessResult SubprocessWrapper::executeWithSudo(const QString& command,
@@ -279,4 +396,3 @@ ProcessResult SubprocessWrapper::executeWithSudo(const QString& command,
     
     return result;
 }
-

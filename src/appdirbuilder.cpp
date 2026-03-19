@@ -195,7 +195,7 @@ bool AppDirBuilder::buildAppDir(const QString& appDirPath,
                 // Verify and fix .desktop file (ensure Categories= is present)
                 if (QFileInfo::exists(targetDesktop)) {
                     qDebug() << "Verified .desktop file exists at:" << targetDesktop;
-                    if (!fixDesktopFile(targetDesktop)) {
+                    if (!fixDesktopFile(targetDesktop, metadata)) {
                         qWarning() << "Failed to fix .desktop file, will create new one";
                         QFile::remove(targetDesktop);
                         desktopCopied = false;
@@ -983,35 +983,7 @@ bool AppDirBuilder::createDesktopFile(const QString& appDirPath, const PackageMe
         out << "Comment=" << desc << "\n";
     }
     
-    // Determine Exec path
-    QString execPath;
-    if (!metadata.mainExecutable.isEmpty()) {
-        QFileInfo execInfo(metadata.mainExecutable);
-        QString execName = execInfo.fileName();
-        // Check if it's a jar file
-        if (execName.endsWith(".jar")) {
-            execPath = execName;
-        } else {
-            // Determine relative path
-            if (metadata.mainExecutable.contains("/usr/games/")) {
-                execPath = QString("usr/games/%1").arg(execName);
-            } else {
-                execPath = QString("usr/bin/%1").arg(execName);
-            }
-        }
-    } else if (!metadata.executables.isEmpty()) {
-        QFileInfo execInfo(metadata.executables.first());
-        QString execName = execInfo.fileName();
-        if (execName.endsWith(".jar")) {
-            execPath = execName;
-        } else {
-            execPath = QString("usr/bin/%1").arg(execName);
-        }
-    }
-    
-    if (!execPath.isEmpty()) {
-        out << "Exec=" << execPath << "\n";
-    }
+    out << "Exec=AppRun\n";
     
     out << "Icon=" << metadata.package << "\n";
     
@@ -1032,7 +1004,7 @@ bool AppDirBuilder::createDesktopFile(const QString& appDirPath, const PackageMe
     return true;
 }
 
-bool AppDirBuilder::fixDesktopFile(const QString& desktopPath) {
+bool AppDirBuilder::fixDesktopFile(const QString& desktopPath, const PackageMetadata& metadata) {
     QFile file(desktopPath);
     if (!file.open(QIODevice::ReadWrite | QIODevice::Text)) {
         qWarning() << "Failed to open .desktop file for fixing:" << desktopPath;
@@ -1045,6 +1017,27 @@ bool AppDirBuilder::fixDesktopFile(const QString& desktopPath) {
     
     bool hasCategories = content.contains("Categories=", Qt::CaseInsensitive);
     bool modified = false;
+    const QString normalizedExec = "Exec=AppRun";
+    const QString normalizedName = metadata.package.isEmpty() ? QFileInfo(desktopPath).baseName() : metadata.package;
+
+    QRegularExpression execRegex("(?im)^Exec=.*$");
+    if (content.contains(execRegex)) {
+        content.replace(execRegex, normalizedExec);
+        modified = true;
+    } else if (content.contains("[Desktop Entry]", Qt::CaseInsensitive)) {
+        content.replace(QRegularExpression("(?i)(\\[Desktop Entry\\])"), QString("\\1\n%1").arg(normalizedExec));
+        modified = true;
+    }
+
+    if (!normalizedName.isEmpty()) {
+        QRegularExpression nameRegex("(?im)^Name=.*$");
+        if (content.contains(nameRegex)) {
+            content.replace(nameRegex, QString("Name=%1").arg(normalizedName));
+        } else if (content.contains("[Desktop Entry]", Qt::CaseInsensitive)) {
+            content.replace(QRegularExpression("(?i)(\\[Desktop Entry\\])"), QString("\\1\nName=%1").arg(normalizedName));
+        }
+        modified = true;
+    }
     
     if (!hasCategories) {
         qDebug() << "Adding missing Categories= to .desktop file";
@@ -1841,4 +1834,3 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
     
     return result;
 }
-

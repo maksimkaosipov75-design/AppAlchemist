@@ -13,9 +13,9 @@ public:
                      const QString& extractedDebDir,
                      const PackageMetadata& metadata,
                      const QStringList& libraries);
-    
+
     bool createDesktopFile(const QString& appDirPath, const PackageMetadata& metadata);
-    bool fixDesktopFile(const QString& desktopPath);
+    bool fixDesktopFile(const QString& desktopPath, const PackageMetadata& metadata);
     bool copyIcon(const QString& appDirPath, const QString& iconPath, const PackageMetadata& metadata);
     bool createAppRun(const QString& appDirPath, const PackageMetadata& metadata);
     
@@ -29,4 +29,3 @@ private:
 };
 
 #endif // APPDIRBUILDER_H
-
