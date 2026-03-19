@@ -50,7 +50,7 @@ Preserve the current "double-click package -> short wait -> usable app on Arch/C
    - self-contained app bundle
 3. Implemented initial version in code: introduce rules-driven compatibility fixes from a data file, not hardcoded branches.
 4. Separate package extraction, classification, repair, validation, and packaging into distinct components.
-5. Build a regression corpus of real packages and store expected outcomes.
+5. Implemented initial corpus manifest: build a regression corpus of real packages and store expected outcomes.
 
 ## Guardrails
 - Do not remove the legacy fallback path until replacement coverage is proven.

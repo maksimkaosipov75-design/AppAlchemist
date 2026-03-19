@@ -1,0 +1,110 @@
+{
+  "version": 1,
+  "description": "Initial regression corpus for package classification and conversion planning. Local cases are expected to be runnable from this repository; optional cases document known-good external packages to keep acquiring over time.",
+  "cases": [
+    {
+      "id": "local-self-hosted-tarball",
+      "enabled": true,
+      "optional": false,
+      "source": {
+        "kind": "repo-file",
+        "path": "packaging/arch/appalchemist-1.0.0.tar.gz"
+      },
+      "expected": {
+        "format": "tarball",
+        "profile": "script",
+        "tarball_subtype": "portable-binary",
+        "plan_mode": "fast-path-preferred",
+        "should_build_appimage": true,
+        "notes": "Self-hosted archive used for smoke testing packaging, probe flow, and tarball subtype classification."
+      }
+    },
+    {
+      "id": "native-gui-deb",
+      "enabled": false,
+      "optional": true,
+      "source": {
+        "kind": "external-package",
+        "acquire": "Store one small GUI .deb package locally and point this entry at the downloaded file."
+      },
+      "expected": {
+        "format": "deb",
+        "profile": "native-desktop",
+        "plan_mode": "fast-path-preferred",
+        "should_build_appimage": true
+      }
+    },
+    {
+      "id": "native-cli-rpm",
+      "enabled": false,
+      "optional": true,
+      "source": {
+        "kind": "external-package",
+        "acquire": "Store one small CLI .rpm package locally and point this entry at the downloaded file."
+      },
+      "expected": {
+        "format": "rpm",
+        "profile": "native-cli",
+        "plan_mode": "fast-path-preferred",
+        "should_build_appimage": true
+      }
+    },
+    {
+      "id": "electron-package",
+      "enabled": false,
+      "optional": true,
+      "source": {
+        "kind": "external-package",
+        "acquire": "Store one Electron package locally, such as a VS Code or VSCodium build."
+      },
+      "expected": {
+        "profile": "electron",
+        "plan_mode": "repair-fallback",
+        "should_build_appimage": true
+      }
+    },
+    {
+      "id": "python-package",
+      "enabled": false,
+      "optional": true,
+      "source": {
+        "kind": "external-package",
+        "acquire": "Store one Python desktop or CLI package locally."
+      },
+      "expected": {
+        "profile": "python",
+        "plan_mode": "repair-fallback",
+        "should_build_appimage": true
+      }
+    },
+    {
+      "id": "java-package",
+      "enabled": false,
+      "optional": true,
+      "source": {
+        "kind": "external-package",
+        "acquire": "Store one Java package with a bundled JAR or bundled JRE locally."
+      },
+      "expected": {
+        "profile": "java",
+        "plan_mode": "repair-fallback",
+        "should_build_appimage": true
+      }
+    },
+    {
+      "id": "source-tarball",
+      "enabled": false,
+      "optional": true,
+      "source": {
+        "kind": "external-package",
+        "acquire": "Store one source archive with build files but no ready launcher."
+      },
+      "expected": {
+        "format": "tarball",
+        "tarball_subtype": "source-archive",
+        "plan_mode": "legacy-fallback",
+        "should_build_appimage": false
+      }
+    }
+  ]
+}
