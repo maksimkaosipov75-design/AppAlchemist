@@ -31,15 +31,6 @@ headerbar:backdrop {
   background: alpha(@headerbar_bg_color, 0.90);
 }
 
-.content-columns {
-  margin-top: 4px;
-}
-
-.workspace-column,
-.sidebar-column {
-  min-width: 0;
-}
-
 .eyebrow {
   color: alpha(@accent_bg_color, 0.95);
   font-size: 0.78rem;
@@ -77,26 +68,6 @@ headerbar:backdrop {
   box-shadow: 0 12px 28px alpha(#000000, 0.06);
 }
 
-.workflow-card {
-  padding-top: 14px;
-  padding-bottom: 14px;
-  background: alpha(@window_fg_color, 0.025);
-  box-shadow: none;
-}
-
-.workflow-steps {
-  margin-top: 2px;
-}
-
-.workflow-step {
-  padding: 7px 12px;
-  border-radius: 999px;
-  background: alpha(@accent_bg_color, 0.08);
-  border: 1px solid alpha(@accent_bg_color, 0.14);
-  color: alpha(@window_fg_color, 0.82);
-  font-weight: 600;
-}
-
 .source-card {
   background:
     radial-gradient(circle at top left,
@@ -119,6 +90,11 @@ headerbar:backdrop {
   font-size: 1.18rem;
   font-weight: 730;
   letter-spacing: -0.02em;
+}
+
+.session-card {
+  padding-top: 16px;
+  padding-bottom: 16px;
 }
 
 .summary-value {
@@ -201,8 +177,7 @@ dropdown > button:focus {
 
 .settings-card .section-title,
 .repo-card .section-title,
-.log-card .section-title,
-.workflow-card .section-title {
+.log-card .section-title {
   font-size: 1rem;
 }
 
@@ -227,6 +202,10 @@ dropdown > button:focus {
 .repo-card,
 .log-card {
   background: linear-gradient(180deg, alpha(@card_bg_color, 0.9), alpha(@card_bg_color, 0.82));
+}
+
+.secondary-tools {
+  margin-top: -2px;
 }
 
 .results-list {
