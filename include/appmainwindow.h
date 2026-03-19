@@ -19,7 +19,12 @@
 #include <QGraphicsDropShadowEffect>
 #include <QTimer>
 #include <QGraphicsEffect>
-#include "packagetoappimagepipeline.h"
+#include <QCheckBox>
+#include <QComboBox>
+#include "conversion_controller.h"
+#include "size_optimizer.h"
+#include "dependency_resolver.h"
+#include "search_dialog.h"
 
 class AppMainWindow : public QMainWindow {
     Q_OBJECT
@@ -37,16 +42,21 @@ protected:
 private slots:
     void onBuildClicked();
     void onSelectOutputDirClicked();
+    void onSearchClicked();
+    void onPackageSelected(const QString& packagePath);
+    void onPackageStarted(int index, int totalCount, const QString& packagePath);
     void onProgress(int percentage, const QString& message);
     void onLog(const QString& message);
     void onError(const QString& errorMessage);
     void onSuccess(const QString& appImagePath);
-    void onPipelineFinished();
+    void onConversionFinished(int successCount, int failureCount, bool cancelled);
+    void onSudoPasswordRequested(const QString& packagePath, const QString& reason);
     void onOpenOutputDirClicked();
 
 private:
     void setupUI();
     void setPackageFile(const QString& filePath);
+    void setPackageFiles(const QStringList& filePaths);  // For batch
     void resetUI();
     void enableControls(bool enabled);
     QString formatLogMessage(const QString& message);
@@ -72,6 +82,7 @@ private:
     QPushButton* m_buildButton;
     QPushButton* m_selectOutputDirButton;
     QPushButton* m_openOutputDirButton;
+    QPushButton* m_searchButton;
     QLabel* m_outputDirLabel;
     
     // Progress
@@ -81,12 +92,17 @@ private:
     // Log
     QTextEdit* m_logText;
     
-    // Pipeline
-    PackageToAppImagePipeline* m_pipeline;
-    QThread* m_pipelineThread;
+    // Conversion
+    ConversionController* m_conversionController;
+    
+    // Optimization controls
+    QCheckBox* m_optimizeCheckBox;
+    QCheckBox* m_resolveDepsCheckBox;
+    QComboBox* m_compressionComboBox;
     
     // State
     QString m_packageFilePath;
+    QStringList m_packageFilePaths;  // For batch conversion
     QString m_outputDir;
     bool m_isProcessing;
     qint64 m_conversionStartTime;
@@ -102,4 +118,3 @@ private:
 };
 
 #endif // APPMAINWINDOW_H
-

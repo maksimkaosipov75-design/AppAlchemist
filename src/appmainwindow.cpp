@@ -1,6 +1,12 @@
 #include "appmainwindow.h"
+#include "tarballparser.h"
+#include "search_dialog.h"
+#include "appstore_window.h"
+// #include "store/store_window.h" // Removed - not used
+#include "repository_browser.h"
 #include <QApplication>
 #include <QMessageBox>
+#include <QInputDialog>
 #include <QDir>
 #include <QFileInfo>
 #include <QDesktopServices>
@@ -19,8 +25,7 @@
 AppMainWindow::AppMainWindow(QWidget* parent)
     : QMainWindow(parent)
     , m_isProcessing(false)
-    , m_pipeline(nullptr)
-    , m_pipelineThread(nullptr)
+    , m_conversionController(new ConversionController(this))
     , m_dropAreaAnimation(nullptr)
     , m_progressAnimation(nullptr)
     , m_successAnimation(nullptr)
@@ -61,17 +66,24 @@ AppMainWindow::AppMainWindow(QWidget* parent)
     
     m_pulseTimer = new QTimer(this);
     m_pulseTimer->setInterval(50);
+
+    connect(m_conversionController, &ConversionController::packageStarted,
+            this, &AppMainWindow::onPackageStarted);
+    connect(m_conversionController, &ConversionController::progress,
+            this, &AppMainWindow::onProgress);
+    connect(m_conversionController, &ConversionController::log,
+            this, &AppMainWindow::onLog);
+    connect(m_conversionController, &ConversionController::error,
+            this, &AppMainWindow::onError);
+    connect(m_conversionController, &ConversionController::success,
+            this, &AppMainWindow::onSuccess);
+    connect(m_conversionController, &ConversionController::finished,
+            this, &AppMainWindow::onConversionFinished);
+    connect(m_conversionController, &ConversionController::sudoPasswordRequested,
+            this, &AppMainWindow::onSudoPasswordRequested);
 }
 
 AppMainWindow::~AppMainWindow() {
-    if (m_pipelineThread) {
-        m_pipelineThread->quit();
-        m_pipelineThread->wait();
-        delete m_pipelineThread;
-    }
-    if (m_pipeline) {
-        delete m_pipeline;
-    }
 }
 
 void AppMainWindow::setupUI() {
@@ -151,10 +163,33 @@ void AppMainWindow::setupUI() {
     );
     m_dropArea->setAlignment(Qt::AlignCenter);
     m_dropArea->setAcceptDrops(true);
-    m_dropArea->setText("Drag and drop a .deb or .rpm file here\nor click to select a file");
+    m_dropArea->setText("Drag and drop a package file here\n(.deb, .rpm, .tar.gz, .tar.xz, .zip)\nor click to select a file");
     m_dropArea->setWordWrap(true);
     m_dropArea->installEventFilter(this);
     m_mainLayout->addWidget(m_dropArea);
+    
+    // Search packages button
+    m_searchButton = new QPushButton("🔍 Search Packages in Repository", this);
+    m_searchButton->setStyleSheet(
+        "QPushButton {"
+        "background-color: rgba(74, 144, 226, 0.4);"
+        "color: white;"
+        "font-weight: 500;"
+        "border-radius: 8px;"
+        "padding: 10px 20px;"
+        "border: 1px solid rgba(74, 144, 226, 0.6);"
+        "}"
+        "QPushButton:hover {"
+        "background-color: rgba(74, 144, 226, 0.6);"
+        "border-color: rgba(74, 144, 226, 0.8);"
+        "}"
+        "QPushButton:pressed {"
+        "background-color: rgba(74, 144, 226, 0.8);"
+        "}"
+    );
+    m_searchButton->setToolTip("Search and download packages from system repositories (apt/dnf/pacman)");
+    connect(m_searchButton, &QPushButton::clicked, this, &AppMainWindow::onSearchClicked);
+    m_mainLayout->addWidget(m_searchButton);
     
     // File label with modern styling
     m_fileLabel = new QLabel("No file selected", this);
@@ -213,6 +248,111 @@ void AppMainWindow::setupUI() {
     outputLayout->addWidget(m_outputDirLabel, 1);
     outputLayout->addWidget(m_selectOutputDirButton);
     m_mainLayout->addLayout(outputLayout);
+    
+    // Optimization options
+    QHBoxLayout* optimizeLayout = new QHBoxLayout();
+    optimizeLayout->setSpacing(15);
+    
+    m_optimizeCheckBox = new QCheckBox("Optimize size", this);
+    m_optimizeCheckBox->setStyleSheet(
+        "QCheckBox {"
+        "color: #e0e0e0;"
+        "font-weight: 500;"
+        "background: transparent;"
+        "}"
+        "QCheckBox::indicator {"
+        "width: 18px;"
+        "height: 18px;"
+        "border: 2px solid rgba(108, 92, 231, 0.6);"
+        "border-radius: 4px;"
+        "background-color: rgba(0, 0, 0, 0.2);"
+        "}"
+        "QCheckBox::indicator:checked {"
+        "background-color: rgba(108, 92, 231, 0.8);"
+        "border-color: #6c5ce7;"
+        "}"
+        "QCheckBox::indicator:hover {"
+        "border-color: #a29bfe;"
+        "}"
+    );
+    m_optimizeCheckBox->setToolTip("Remove unnecessary files and strip binaries to reduce AppImage size");
+    
+    m_resolveDepsCheckBox = new QCheckBox("Resolve dependencies", this);
+    m_resolveDepsCheckBox->setStyleSheet(
+        "QCheckBox {"
+        "color: #e0e0e0;"
+        "font-weight: 500;"
+        "background: transparent;"
+        "}"
+        "QCheckBox::indicator {"
+        "width: 18px;"
+        "height: 18px;"
+        "border: 2px solid rgba(108, 92, 231, 0.6);"
+        "border-radius: 4px;"
+        "background-color: rgba(0, 0, 0, 0.2);"
+        "}"
+        "QCheckBox::indicator:checked {"
+        "background-color: rgba(108, 92, 231, 0.8);"
+        "border-color: #6c5ce7;"
+        "}"
+        "QCheckBox::indicator:hover {"
+        "border-color: #a29bfe;"
+        "}"
+    );
+    m_resolveDepsCheckBox->setToolTip("Download missing library dependencies from repositories");
+    
+    QLabel* compressionLabel = new QLabel("Compression:", this);
+    compressionLabel->setStyleSheet("color: #e0e0e0; font-weight: 500; background: transparent;");
+    
+    m_compressionComboBox = new QComboBox(this);
+    m_compressionComboBox->addItem("Fast (gzip)", static_cast<int>(CompressionLevel::FAST));
+    m_compressionComboBox->addItem("Normal (gzip)", static_cast<int>(CompressionLevel::NORMAL));
+    m_compressionComboBox->addItem("Maximum (zstd)", static_cast<int>(CompressionLevel::MAXIMUM));
+    m_compressionComboBox->addItem("Ultra (zstd)", static_cast<int>(CompressionLevel::ULTRA));
+    m_compressionComboBox->setCurrentIndex(1);  // Default to Normal
+    m_compressionComboBox->setStyleSheet(
+        "QComboBox {"
+        "background-color: rgba(255, 255, 255, 0.1);"
+        "color: white;"
+        "border: 1px solid rgba(255, 255, 255, 0.2);"
+        "border-radius: 8px;"
+        "padding: 6px 12px;"
+        "min-width: 120px;"
+        "}"
+        "QComboBox:hover {"
+        "border-color: rgba(108, 92, 231, 0.6);"
+        "}"
+        "QComboBox::drop-down {"
+        "border: none;"
+        "width: 20px;"
+        "}"
+        "QComboBox::down-arrow {"
+        "image: none;"
+        "border-left: 5px solid transparent;"
+        "border-right: 5px solid transparent;"
+        "border-top: 6px solid #e0e0e0;"
+        "margin-right: 8px;"
+        "}"
+        "QComboBox QAbstractItemView {"
+        "background-color: #1a1a2e;"
+        "color: white;"
+        "selection-background-color: rgba(108, 92, 231, 0.5);"
+        "border: 1px solid rgba(255, 255, 255, 0.2);"
+        "border-radius: 4px;"
+        "}"
+    );
+    m_compressionComboBox->setToolTip("Choose compression level:\n"
+        "Fast: Quick build, larger file\n"
+        "Normal: Balanced (default)\n"
+        "Maximum: Slower build, smaller file\n"
+        "Ultra: Slowest build, smallest file");
+    
+    optimizeLayout->addWidget(m_optimizeCheckBox);
+    optimizeLayout->addWidget(m_resolveDepsCheckBox);
+    optimizeLayout->addStretch();
+    optimizeLayout->addWidget(compressionLabel);
+    optimizeLayout->addWidget(m_compressionComboBox);
+    m_mainLayout->addLayout(optimizeLayout);
     
     // Build button with gradient
     m_buildButton = new QPushButton("Build AppImage", this);
@@ -348,13 +488,15 @@ void AppMainWindow::setupUI() {
 void AppMainWindow::dragEnterEvent(QDragEnterEvent* event) {
     if (event->mimeData()->hasUrls() && !m_isProcessing) {
         QList<QUrl> urls = event->mimeData()->urls();
-        if (!urls.isEmpty()) {
-            QString filePath = urls.first().toLocalFile();
+        // Check if at least one file is valid
+        for (const QUrl& url : urls) {
+            QString filePath = url.toLocalFile();
             QFileInfo info(filePath);
             QString suffix = info.suffix().toLower();
-            if (suffix == "deb" || suffix == "rpm") {
+            if (suffix == "deb" || suffix == "rpm" || TarballParser::isSupportedTarball(filePath)) {
                 event->acceptProposedAction();
                 animateDropAreaDragEnter();
+                return;
             }
         }
     }
@@ -370,20 +512,32 @@ void AppMainWindow::dropEvent(QDropEvent* event) {
     
     if (event->mimeData()->hasUrls() && !m_isProcessing) {
         QList<QUrl> urls = event->mimeData()->urls();
-        if (!urls.isEmpty()) {
-            QString filePath = urls.first().toLocalFile();
+        QStringList validFiles;
+        
+        for (const QUrl& url : urls) {
+            QString filePath = url.toLocalFile();
             QFileInfo info(filePath);
             QString suffix = info.suffix().toLower();
-            if (suffix == "deb" || suffix == "rpm") {
-                setPackageFile(filePath);
-                event->acceptProposedAction();
+            if (suffix == "deb" || suffix == "rpm" || TarballParser::isSupportedTarball(filePath)) {
+                validFiles.append(filePath);
             }
+        }
+        
+        if (!validFiles.isEmpty()) {
+            if (validFiles.size() == 1) {
+                setPackageFile(validFiles.first());
+            } else {
+                setPackageFiles(validFiles);
+            }
+            event->acceptProposedAction();
         }
     }
 }
 
 void AppMainWindow::setPackageFile(const QString& filePath) {
     m_packageFilePath = filePath;
+    m_packageFilePaths.clear();
+    m_packageFilePaths.append(filePath);
     QFileInfo info(filePath);
     m_fileLabel->setText(QString("Selected: %1").arg(info.fileName()));
     m_fileLabel->setStyleSheet(
@@ -398,6 +552,37 @@ void AppMainWindow::setPackageFile(const QString& filePath) {
     m_buildButton->setEnabled(true);
 }
 
+void AppMainWindow::setPackageFiles(const QStringList& filePaths) {
+    m_packageFilePaths = filePaths;
+    m_packageFilePath = filePaths.first();
+    
+    // Build list of filenames for display
+    QStringList fileNames;
+    for (const QString& path : filePaths) {
+        fileNames.append(QFileInfo(path).fileName());
+    }
+    
+    QString displayText;
+    if (filePaths.size() <= 3) {
+        displayText = QString("Selected %1 files: %2").arg(filePaths.size()).arg(fileNames.join(", "));
+    } else {
+        displayText = QString("Selected %1 files: %2, ...").arg(filePaths.size()).arg(fileNames.mid(0, 2).join(", "));
+    }
+    
+    m_fileLabel->setText(displayText);
+    m_fileLabel->setStyleSheet(
+        "QLabel {"
+        "color: #6c5ce7;"
+        "font-weight: bold;"
+        "font-size: 12px;"
+        "padding: 8px;"
+        "background: transparent;"
+        "}"
+    );
+    m_buildButton->setEnabled(true);
+    m_buildButton->setText(QString("Build %1 AppImages").arg(filePaths.size()));
+}
+
 void AppMainWindow::onSelectOutputDirClicked() {
     QString dir = QFileDialog::getExistingDirectory(this, "Select Output Directory", m_outputDir);
     if (!dir.isEmpty()) {
@@ -407,16 +592,26 @@ void AppMainWindow::onSelectOutputDirClicked() {
     }
 }
 
+void AppMainWindow::onSearchClicked() {
+    AppStoreWindow dialog(this);
+    connect(&dialog, &AppStoreWindow::packageSelected, this, &AppMainWindow::onPackageSelected);
+    dialog.exec();
+}
+
+void AppMainWindow::onPackageSelected(const QString& packagePath) {
+    if (!packagePath.isEmpty()) {
+        setPackageFile(packagePath);
+    }
+}
+
 void AppMainWindow::onBuildClicked() {
-    if (m_packageFilePath.isEmpty()) {
-        QMessageBox::warning(this, "No file selected", "Please select a .deb or .rpm file first.");
+    if (m_packageFilePaths.isEmpty()) {
+        QMessageBox::warning(this, "No file selected", "Please select a package file first (.deb, .rpm, or archive).");
         return;
     }
     
     if (m_isProcessing) {
-        if (m_pipeline) {
-            m_pipeline->cancel();
-        }
+        m_conversionController->cancel();
         return;
     }
     
@@ -425,7 +620,12 @@ void AppMainWindow::onBuildClicked() {
     m_conversionStartTime = QDateTime::currentMSecsSinceEpoch();
     enableControls(false);
     m_buildButton->setText("Cancel");
-    m_statusLabel->setText("Processing...");
+    
+    if (m_packageFilePaths.size() > 1) {
+        m_statusLabel->setText(QString("Processing batch: 1/%1...").arg(m_packageFilePaths.size()));
+    } else {
+        m_statusLabel->setText("Processing...");
+    }
     m_statusLabel->setStyleSheet(
         "QLabel {"
         "font-weight: bold;"
@@ -435,31 +635,37 @@ void AppMainWindow::onBuildClicked() {
         "background: transparent;"
         "}"
     );
-    
-    // Create pipeline in separate thread
-    m_pipelineThread = new QThread(this);
-    m_pipeline = new PackageToAppImagePipeline();
-    m_pipeline->moveToThread(m_pipelineThread);
-    
-    connect(m_pipelineThread, &QThread::started, m_pipeline, &PackageToAppImagePipeline::start);
-    connect(m_pipeline, &PackageToAppImagePipeline::progress, this, &AppMainWindow::onProgress);
-    connect(m_pipeline, &PackageToAppImagePipeline::log, this, &AppMainWindow::onLog);
-    connect(m_pipeline, &PackageToAppImagePipeline::error, this, &AppMainWindow::onError);
-    connect(m_pipeline, &PackageToAppImagePipeline::success, this, &AppMainWindow::onSuccess);
-    connect(m_pipeline, &PackageToAppImagePipeline::finished, this, &AppMainWindow::onPipelineFinished);
-    connect(m_pipelineThread, &QThread::finished, m_pipeline, &QObject::deleteLater);
-    
-    // Set paths
-    m_pipeline->setPackagePath(m_packageFilePath);
-    if (!m_outputDir.isEmpty()) {
-        QFileInfo packageInfo(m_packageFilePath);
-        QString appImagePath = QString("%1/%2.AppImage")
-            .arg(m_outputDir)
-            .arg(packageInfo.baseName());
-        m_pipeline->setOutputPath(appImagePath);
+
+    ConversionRequest request;
+    request.packagePaths = m_packageFilePaths;
+    request.outputDir = m_outputDir;
+
+    OptimizationSettings optSettings;
+    optSettings.enabled = m_optimizeCheckBox->isChecked();
+    optSettings.compression = static_cast<CompressionLevel>(
+        m_compressionComboBox->currentData().toInt());
+    request.optimizationSettings = optSettings;
+
+    DependencySettings depSettings;
+    depSettings.enabled = m_resolveDepsCheckBox->isChecked();
+    request.dependencySettings = depSettings;
+
+    m_conversionController->start(request);
+}
+
+void AppMainWindow::onPackageStarted(int index, int totalCount, const QString& packagePath) {
+    const QFileInfo packageInfo(packagePath);
+
+    if (totalCount > 1) {
+        onLog(QString("=== [%1/%2] Converting: %3 ===")
+            .arg(index + 1)
+            .arg(totalCount)
+            .arg(packageInfo.fileName()));
+        m_statusLabel->setText(QString("Processing %1/%2: %3...")
+            .arg(index + 1)
+            .arg(totalCount)
+            .arg(packageInfo.fileName()));
     }
-    
-    m_pipelineThread->start();
 }
 
 void AppMainWindow::onProgress(int percentage, const QString& message) {
@@ -527,7 +733,13 @@ QString AppMainWindow::formatLogMessage(const QString& message) {
 }
 
 void AppMainWindow::onError(const QString& errorMessage) {
-    m_statusLabel->setText("Error: " + errorMessage);
+    if (m_packageFilePaths.size() > 1) {
+        m_statusLabel->setText(errorMessage);
+    } else {
+        m_statusLabel->setText("Error: " + errorMessage);
+        QMessageBox::critical(this, "Error", errorMessage);
+    }
+    
     m_statusLabel->setStyleSheet(
         "QLabel {"
         "font-weight: bold;"
@@ -537,11 +749,23 @@ void AppMainWindow::onError(const QString& errorMessage) {
         "background: transparent;"
         "}"
     );
-    QMessageBox::critical(this, "Error", errorMessage);
 }
 
 void AppMainWindow::onSuccess(const QString& appImagePath) {
-    m_statusLabel->setText("Success! AppImage created.");
+    if (m_packageFilePaths.size() > 1) {
+        m_statusLabel->setText(QString("Created %1")
+            .arg(QFileInfo(appImagePath).fileName()));
+    } else {
+        m_statusLabel->setText("Success! AppImage created.");
+        m_openOutputDirButton->setEnabled(true);
+        
+        // Animate success
+        animateSuccess();
+        
+        QMessageBox::information(this, "Success", 
+            QString("AppImage created successfully!\n\n%1").arg(appImagePath));
+    }
+    
     m_statusLabel->setStyleSheet(
         "QLabel {"
         "font-weight: bold;"
@@ -551,28 +775,76 @@ void AppMainWindow::onSuccess(const QString& appImagePath) {
         "background: transparent;"
         "}"
     );
-    m_openOutputDirButton->setEnabled(true);
-    
-    // Animate success
-    animateSuccess();
-    
-    QMessageBox::information(this, "Success", 
-        QString("AppImage created successfully!\n\n%1").arg(appImagePath));
 }
 
-void AppMainWindow::onPipelineFinished() {
+void AppMainWindow::onConversionFinished(int successCount, int failureCount, bool cancelled) {
     m_isProcessing = false;
     enableControls(true);
-    m_buildButton->setText("Build AppImage");
-    m_buildButton->setEnabled(!m_packageFilePath.isEmpty());
-    
-    if (m_pipelineThread) {
-        m_pipelineThread->quit();
-        m_pipelineThread->wait();
-        delete m_pipelineThread;
-        m_pipelineThread = nullptr;
+
+    if (m_packageFilePaths.size() > 1) {
+        m_buildButton->setText(QString("Build %1 AppImages").arg(m_packageFilePaths.size()));
+    } else {
+        m_buildButton->setText("Build AppImage");
     }
-    m_pipeline = nullptr;
+    m_buildButton->setEnabled(!m_packageFilePaths.isEmpty());
+
+    if (cancelled) {
+        m_statusLabel->setText("Conversion cancelled.");
+        m_statusLabel->setStyleSheet(
+            "QLabel { font-weight: bold; font-size: 13px; color: #f39c12; padding: 10px; background: transparent; }"
+        );
+        m_openOutputDirButton->setEnabled(successCount > 0);
+        return;
+    }
+
+    if (m_packageFilePaths.size() > 1) {
+        QString resultMsg;
+        QString resultStyle;
+
+        if (failureCount == 0) {
+            resultMsg = QString("Batch complete: All %1 packages converted successfully!").arg(successCount);
+            resultStyle = "QLabel { font-weight: bold; font-size: 13px; color: #2ecc71; padding: 10px; background: transparent; }";
+        } else if (successCount == 0) {
+            resultMsg = QString("Batch failed: All %1 packages failed to convert").arg(failureCount);
+            resultStyle = "QLabel { font-weight: bold; font-size: 13px; color: #e74c3c; padding: 10px; background: transparent; }";
+        } else {
+            resultMsg = QString("Batch complete: %1 succeeded, %2 failed").arg(successCount).arg(failureCount);
+            resultStyle = "QLabel { font-weight: bold; font-size: 13px; color: #f39c12; padding: 10px; background: transparent; }";
+        }
+
+        m_statusLabel->setText(resultMsg);
+        m_statusLabel->setStyleSheet(resultStyle);
+        QMessageBox::information(this, "Batch Conversion Complete", resultMsg);
+    }
+
+    m_openOutputDirButton->setEnabled(successCount > 0);
+}
+
+void AppMainWindow::onSudoPasswordRequested(const QString& packagePath, const QString& reason) {
+    bool ok = false;
+    const QString password = QInputDialog::getText(
+        this,
+        tr("Sudo Password Required"),
+        tr("%1\n\nPackage: %2\n\nEnter your password or leave it empty to continue without it.")
+            .arg(reason, QFileInfo(packagePath).fileName()),
+        QLineEdit::Password,
+        QString(),
+        &ok
+    );
+
+    if (!ok) {
+        onLog("WARNING: Sudo password dialog was dismissed. Continuing without dependency download credentials.");
+        m_conversionController->continueWithoutSudoPassword();
+        return;
+    }
+
+    if (password.isEmpty()) {
+        onLog("WARNING: No sudo password provided. Dependency resolution may fail for pacman packages.");
+        m_conversionController->continueWithoutSudoPassword();
+        return;
+    }
+
+    m_conversionController->provideSudoPassword(password);
 }
 
 void AppMainWindow::onOpenOutputDirClicked() {
@@ -587,7 +859,8 @@ bool AppMainWindow::eventFilter(QObject* obj, QEvent* event) {
             QString filePath = QFileDialog::getOpenFileName(this, 
                 "Select package file", 
                 QDir::homePath(),
-                "Package files (*.deb *.rpm);;Debian packages (*.deb);;RPM packages (*.rpm)");
+                "All supported (*.deb *.rpm *.tar.gz *.tgz *.tar.xz *.txz *.tar.bz2 *.tar.zst *.zip *.tar);;"
+                "Debian packages (*.deb);;RPM packages (*.rpm);;" + TarballParser::getFileFilter());
             if (!filePath.isEmpty()) {
                 setPackageFile(filePath);
             }
@@ -612,6 +885,7 @@ void AppMainWindow::resetUI() {
     );
     m_logText->clear();
     m_openOutputDirButton->setEnabled(false);
+    m_progressBar->show();
     
     // Reset graphics effects
     m_statusLabel->setGraphicsEffect(nullptr);
@@ -620,6 +894,10 @@ void AppMainWindow::resetUI() {
 
 void AppMainWindow::enableControls(bool enabled) {
     m_selectOutputDirButton->setEnabled(enabled);
+    m_optimizeCheckBox->setEnabled(enabled);
+    m_resolveDepsCheckBox->setEnabled(enabled);
+    m_compressionComboBox->setEnabled(enabled);
+    m_searchButton->setEnabled(enabled);
     // Don't disable build button - it becomes cancel button
 }
 
@@ -817,4 +1095,3 @@ void AppMainWindow::animateButtonPulse(QPushButton* button) {
     colorAnim->setLoopCount(3);
     colorAnim->start(QAbstractAnimation::DeleteWhenStopped);
 }
-
