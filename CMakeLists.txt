@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network Xml Sql)
+find_package(Qt6 REQUIRED COMPONENTS Core Network Xml Sql)
 find_package(PkgConfig QUIET)
 
 set(CMAKE_AUTOMOC ON)
@@ -53,48 +53,6 @@ set(APPALCHEMIST_BACKEND_HEADERS
     include/cache_manager.h
 )
 
-set(APPALCHEMIST_QT_GUI_SOURCES
-    src/main.cpp
-    src/appmainwindow.cpp
-    src/cli_converter.cpp
-    src/search_dialog.cpp
-    src/appstore_window.cpp
-    src/appstream_metadata.cpp
-    src/appstore_model.cpp
-    src/app_card_widget.cpp
-    src/app_details_dialog.cpp
-    src/store/store_repository.cpp
-    src/store/store_indexer.cpp
-    src/store/store_cache.cpp
-    src/store/store_ratings.cpp
-    src/store/store_viewmodel.cpp
-    src/store/store_app_card.cpp
-    src/store/store_details_dialog.cpp
-)
-
-set(APPALCHEMIST_QT_GUI_HEADERS
-    include/appmainwindow.h
-    include/cli_converter.h
-    include/search_dialog.h
-    include/appstore_window.h
-    include/appstream_metadata.h
-    include/appstore_model.h
-    include/app_card_widget.h
-    include/app_details_dialog.h
-    include/store/store_appentry.h
-    include/store/store_repository.h
-    include/store/store_indexer.h
-    include/store/store_cache.h
-    include/store/store_ratings.h
-    include/store/store_viewmodel.h
-    include/store/store_app_card.h
-    include/store/store_details_dialog.h
-)
-
-set(APPALCHEMIST_UI
-    ui/appmainwindow.ui
-)
-
 add_library(appalchemist_backend STATIC
     ${APPALCHEMIST_BACKEND_SOURCES}
     ${APPALCHEMIST_BACKEND_HEADERS}
@@ -137,32 +95,10 @@ if(GTK_FRONTEND_FOUND)
         PRIVATE
             appalchemist_backend
             PkgConfig::GTK_FRONTEND
-            Qt6::Widgets
-    )
-
-    add_executable(appalchemist-qt
-        ${APPALCHEMIST_QT_GUI_SOURCES}
-        ${APPALCHEMIST_QT_GUI_HEADERS}
-        ${APPALCHEMIST_UI}
-    )
-
-    target_link_libraries(appalchemist-qt
-        PRIVATE
-            appalchemist_backend
-            Qt6::Widgets
+            Qt6::Core
     )
 else()
-    add_executable(appalchemist
-        ${APPALCHEMIST_QT_GUI_SOURCES}
-        ${APPALCHEMIST_QT_GUI_HEADERS}
-        ${APPALCHEMIST_UI}
-    )
-
-    target_link_libraries(appalchemist
-        PRIVATE
-            appalchemist_backend
-            Qt6::Widgets
-    )
+    message(FATAL_ERROR "GTK4/libadwaita frontend is required for this build")
 endif()
 
 # Install
@@ -212,7 +148,7 @@ install(FILES packaging/mime/rpm-package.xml
 # Install bundled appimagetool if available
 if(EXISTS "${CMAKE_SOURCE_DIR}/thirdparty/appimagetool")
     install(PROGRAMS thirdparty/appimagetool
-        DESTINATION usr/lib/appalchemist
+        DESTINATION lib/appalchemist
         RENAME appimagetool
     )
 endif()

@@ -44,12 +44,11 @@ mkdir -p "$APPDIR/usr/share/applications"
 mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 mkdir -p "$APPDIR/usr/share/mime/packages"
 
-# Package GTK frontend as the primary desktop executable while keeping CLI support
-# in the same binary through frontend/gtk/main.cpp.
-if [ -f "$BUILD_DIR/appalchemist-gtk" ]; then
-    echo "Using GTK frontend as primary AppImage executable..."
-    cp "$BUILD_DIR/appalchemist-gtk" "$APPDIR/usr/bin/appalchemist"
-    chmod +x "$APPDIR/usr/bin/appalchemist"
+# The project is GTK4-only. Always package the freshly installed appalchemist
+# binary from the current build instead of any stale legacy frontend artifact.
+if [ ! -x "$APPDIR/usr/bin/appalchemist" ]; then
+    echo "ERROR: Freshly built GTK executable not found at $APPDIR/usr/bin/appalchemist"
+    exit 1
 fi
 
 # Copy appimagetool if available
@@ -119,7 +118,10 @@ fi
 
 # Method 5: Check if appalchemist is in PATH (system installation)
 if [ -z "${APPIMAGE_PATH}" ] && command -v appalchemist >/dev/null 2>&1; then
-    exec appalchemist "$@"
+    SYSTEM_APPALCHEMIST="$(command -v appalchemist)"
+    if [ "${SYSTEM_APPALCHEMIST}" != "${0}" ]; then
+        exec "${SYSTEM_APPALCHEMIST}" "$@"
+    fi
     exit $?
 fi
 
@@ -190,15 +192,11 @@ THIRDPARTY_DIR="$PROJECT_DIR/thirdparty"
 mkdir -p "$THIRDPARTY_DIR"
 
 LINUXDEPLOY=""
-LINUXDEPLOY_PLUGIN_QT=""
-
 # Determine linuxdeploy filename based on architecture
 if [ "$ARCH_NAME" = "x86_64" ]; then
     LINUXDEPLOY_FILE="linuxdeploy-x86_64.AppImage"
-    LINUXDEPLOY_PLUGIN_QT_FILE="linuxdeploy-plugin-qt-x86_64.AppImage"
 else
     LINUXDEPLOY_FILE="linuxdeploy-${ARCH_NAME}.AppImage"
-    LINUXDEPLOY_PLUGIN_QT_FILE="linuxdeploy-plugin-qt-${ARCH_NAME}.AppImage"
 fi
 
 # Download linuxdeploy if not present
@@ -210,20 +208,8 @@ if [ ! -f "$THIRDPARTY_DIR/$LINUXDEPLOY_FILE" ]; then
     cd "$PROJECT_DIR"
 fi
 
-# Download Qt plugin if not present
-if [ ! -f "$THIRDPARTY_DIR/$LINUXDEPLOY_PLUGIN_QT_FILE" ]; then
-    echo "Downloading linuxdeploy Qt plugin..."
-    cd "$THIRDPARTY_DIR"
-    wget -q --show-progress "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/$LINUXDEPLOY_PLUGIN_QT_FILE" -O "$LINUXDEPLOY_PLUGIN_QT_FILE"
-    chmod +x "$LINUXDEPLOY_PLUGIN_QT_FILE"
-    cd "$PROJECT_DIR"
-fi
-
 LINUXDEPLOY="$THIRDPARTY_DIR/$LINUXDEPLOY_FILE"
-LINUXDEPLOY_PLUGIN_QT="$THIRDPARTY_DIR/$LINUXDEPLOY_PLUGIN_QT_FILE"
-
 # Bundle desktop dependencies using generic linuxdeploy.
-QT_BUNDLED=false
 DESKTOP_RUNTIME_BUNDLED=false
 if [ -f "$LINUXDEPLOY" ]; then
     echo "Bundling desktop dependencies with linuxdeploy..."
@@ -237,60 +223,53 @@ if [ -f "$LINUXDEPLOY" ]; then
     if [ -f "$APPDIR/usr/lib/libgtk-4.so.1" ] || [ -f "$APPDIR/usr/lib/libadwaita-1.so.0" ]; then
         DESKTOP_RUNTIME_BUNDLED=true
         echo "✓ GTK/libadwaita libraries successfully bundled"
-    elif [ -f "$APPDIR/usr/lib/libQt6Core.so.6" ]; then
-        DESKTOP_RUNTIME_BUNDLED=true
-        QT_BUNDLED=true
-        echo "✓ Qt libraries successfully bundled"
     else
-        echo "WARNING: Expected GTK/libadwaita or Qt runtime libraries were not found after linuxdeploy"
+        echo "WARNING: Expected GTK/libadwaita runtime libraries were not found after linuxdeploy"
     fi
 else
     echo "WARNING: linuxdeploy not found!"
 fi
 
-# If Qt libraries weren't bundled, try manual fallback (for critical libraries only)
-if [ "$DESKTOP_RUNTIME_BUNDLED" = false ]; then
-    echo "Attempting manual Qt6 library bundling..."
-    
-    # Find Qt6 installation
-    QT6_LIB_DIR=""
-    for dir in /usr/lib /usr/lib64; do
-        if [ -f "$dir/libQt6Core.so.6" ]; then
-            QT6_LIB_DIR="$dir"
-            break
-        fi
-    done
-    
-    if [ -n "$QT6_LIB_DIR" ]; then
-        echo "Found Qt6 at: $QT6_LIB_DIR"
-        mkdir -p "$APPDIR/usr/lib"
-        
-        # Copy essential Qt6 libraries
-        for lib in libQt6Core.so.6 libQt6Widgets.so.6 libQt6Network.so.6 libQt6Gui.so.6 libQt6DBus.so.6; do
-            if [ -f "$QT6_LIB_DIR/$lib" ]; then
-                cp "$QT6_LIB_DIR/$lib" "$APPDIR/usr/lib/" 2>/dev/null && echo "  Copied $lib" || true
-            fi
-        done
-        
-        # Copy Qt6 plugins if available
-        if [ -d "$QT6_LIB_DIR/qt6/plugins" ]; then
-            mkdir -p "$APPDIR/usr/lib/qt6/plugins"
-            cp -r "$QT6_LIB_DIR/qt6/plugins/"* "$APPDIR/usr/lib/qt6/plugins/" 2>/dev/null && echo "  Copied Qt6 plugins" || true
-        fi
-        # Also check /usr/lib/qt6/plugins directly
-        if [ -d "/usr/lib/qt6/plugins" ] && [ ! -d "$APPDIR/usr/lib/qt6/plugins/platforms" ]; then
-            mkdir -p "$APPDIR/usr/lib/qt6/plugins"
-            cp -r "/usr/lib/qt6/plugins/"* "$APPDIR/usr/lib/qt6/plugins/" 2>/dev/null && echo "  Copied Qt6 plugins from /usr/lib/qt6/plugins" || true
-        fi
-        
-        # Verify bundling
-        if [ -f "$APPDIR/usr/lib/libQt6Core.so.6" ]; then
-            QT_BUNDLED=true
-            echo "✓ Qt6 libraries manually bundled"
-        fi
-    else
-        echo "ERROR: Qt6 not found on system. Cannot bundle dependencies."
-        echo "The AppImage will require Qt6 to be installed on the target system."
+# Bundle GTK runtime data that linuxdeploy often misses for gtk4/libadwaita apps.
+# Without these, the AppImage may build fine but fail to start on user systems.
+echo "Bundling GTK runtime data..."
+
+mkdir -p "$APPDIR/usr/share/glib-2.0/schemas"
+if [ -d "/usr/share/glib-2.0/schemas" ]; then
+    cp -a /usr/share/glib-2.0/schemas/. "$APPDIR/usr/share/glib-2.0/schemas/" 2>/dev/null || true
+fi
+
+mkdir -p "$APPDIR/usr/lib/gio/modules"
+if [ -d "/usr/lib/gio/modules" ]; then
+    cp -a /usr/lib/gio/modules/. "$APPDIR/usr/lib/gio/modules/" 2>/dev/null || true
+fi
+
+if [ -d "/usr/lib/gdk-pixbuf-2.0/2.10.0" ]; then
+    mkdir -p "$APPDIR/usr/lib/gdk-pixbuf-2.0/2.10.0"
+    cp -a /usr/lib/gdk-pixbuf-2.0/2.10.0/loaders "$APPDIR/usr/lib/gdk-pixbuf-2.0/2.10.0/" 2>/dev/null || true
+    if command -v gdk-pixbuf-query-loaders >/dev/null 2>&1; then
+        GDK_PIXBUF_MODULEDIR="$APPDIR/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders" \
+            gdk-pixbuf-query-loaders > "$APPDIR/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache" 2>/dev/null || true
+    elif [ -f "/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache" ]; then
+        sed "s|/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders|$APPDIR/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders|g" \
+            /usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache > "$APPDIR/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache" 2>/dev/null || true
+    fi
+    if [ -f "$APPDIR/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache" ]; then
+        sed "s|$APPDIR|@APPDIR@|g" \
+            "$APPDIR/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache" \
+            > "$APPDIR/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache.in" 2>/dev/null || true
+    fi
+fi
+
+if [ -d "/usr/lib/gtk-4.0/4.0.0/immodules" ]; then
+    mkdir -p "$APPDIR/usr/lib/gtk-4.0/4.0.0"
+    cp -a /usr/lib/gtk-4.0/4.0.0/immodules "$APPDIR/usr/lib/gtk-4.0/4.0.0/" 2>/dev/null || true
+    if command -v gtk4-query-immodules >/dev/null 2>&1; then
+        gtk4-query-immodules "$APPDIR/usr/lib/gtk-4.0/4.0.0/immodules/"*.so \
+            > "$APPDIR/usr/lib/gtk-4.0/4.0.0/immodules.cache" 2>/dev/null || true
+    elif command -v gtk-query-immodules-4.0 >/dev/null 2>&1; then
+        gtk-query-immodules-4.0 "$APPDIR/usr/lib/gtk-4.0/4.0.0/immodules/"*.so \
+            > "$APPDIR/usr/lib/gtk-4.0/4.0.0/immodules.cache" 2>/dev/null || true
     fi
 fi
 
@@ -332,11 +311,33 @@ export XDG_DATA_DIRS="${HERE}/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/s
 export GSETTINGS_SCHEMA_DIR="${HERE}/usr/share/glib-2.0/schemas:${GSETTINGS_SCHEMA_DIR:-}"
 export GI_TYPELIB_PATH="${HERE}/usr/lib/girepository-1.0:${GI_TYPELIB_PATH:-}"
 
-# Keep Qt runtime available for CLI conversion code paths and mixed dependencies.
-if [ -d "${HERE}/usr/lib/qt6/plugins" ]; then
-    export QT_PLUGIN_PATH="${HERE}/usr/lib/qt6/plugins${QT_PLUGIN_PATH:+:${QT_PLUGIN_PATH}}"
+# Isolate the bundled GTK4 runtime from host-side GTK2/GTK3 modules and IM hooks.
+# Host environment variables here often make AppImages fail before the first window.
+unset GTK_PATH
+unset GTK_EXE_PREFIX
+unset GTK_DATA_PREFIX
+unset GTK_MODULES
+
+export GIO_MODULE_DIR="${HERE}/usr/lib/gio/modules${GIO_MODULE_DIR:+:${GIO_MODULE_DIR}}"
+export GDK_PIXBUF_MODULEDIR="${HERE}/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders"
+export GTK_IM_MODULE_DIR="${HERE}/usr/lib/gtk-4.0/4.0.0/immodules"
+export GTK_IM_MODULE="${GTK_IM_MODULE:-simple}"
+
+if [ -f "${HERE}/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache.in" ]; then
+    GDK_PIXBUF_RUNTIME_CACHE="${XDG_CACHE_HOME:-${HOME}/.cache}/appalchemist/gdk-pixbuf-loaders.cache"
+    mkdir -p "$(dirname "${GDK_PIXBUF_RUNTIME_CACHE}")"
+    sed "s|@APPDIR@|${HERE}|g" \
+        "${HERE}/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache.in" > "${GDK_PIXBUF_RUNTIME_CACHE}" 2>/dev/null || true
+    if [ -f "${GDK_PIXBUF_RUNTIME_CACHE}" ]; then
+        export GDK_PIXBUF_MODULE_FILE="${GDK_PIXBUF_RUNTIME_CACHE}"
+    fi
+elif [ -f "${HERE}/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache" ]; then
+    export GDK_PIXBUF_MODULE_FILE="${HERE}/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
 fi
-export QML2_IMPORT_PATH="${HERE}/usr/lib/qml${QML2_IMPORT_PATH:+:${QML2_IMPORT_PATH}}"
+
+if [ -f "${HERE}/usr/lib/gtk-4.0/4.0.0/immodules.cache" ]; then
+    export GTK_IM_MODULE_FILE="${HERE}/usr/lib/gtk-4.0/4.0.0/immodules.cache"
+fi
 
 # Register desktop files and MIME types on first run
 if [ -d "${HERE}/usr/share/applications" ]; then
@@ -347,11 +348,16 @@ if [ -d "${HERE}/usr/share/applications" ]; then
     
     # Copy desktop handlers to user's applications directory for file associations
     # Also copy wrapper script to user's bin directory
-    if [ ! -f "${HOME}/.local/share/applications/appalchemist-deb-handler.desktop" ] || \
+    if [ ! -f "${HOME}/.local/share/applications/appalchemist.desktop" ] || \
+       [ "${HERE}/usr/share/applications/appalchemist.desktop" -nt "${HOME}/.local/share/applications/appalchemist.desktop" ] || \
+       [ ! -f "${HOME}/.local/share/applications/appalchemist-deb-handler.desktop" ] || \
        [ "${HERE}/usr/share/applications/appalchemist-deb-handler.desktop" -nt "${HOME}/.local/share/applications/appalchemist-deb-handler.desktop" ]; then
         mkdir -p "${HOME}/.local/share/applications"
         mkdir -p "${HOME}/.local/bin"
         
+        # Copy main launcher desktop entry
+        cp "${HERE}/usr/share/applications/appalchemist.desktop" "${HOME}/.local/share/applications/" 2>/dev/null || true
+
         # Copy desktop handlers
         cp "${HERE}/usr/share/applications/appalchemist-deb-handler.desktop" "${HOME}/.local/share/applications/" 2>/dev/null || true
         cp "${HERE}/usr/share/applications/appalchemist-rpm-handler.desktop" "${HOME}/.local/share/applications/" 2>/dev/null || true
@@ -370,6 +376,7 @@ fi
 
 # Register MIME types
 if [ -d "${HERE}/usr/share/mime/packages" ] && command -v update-mime-database >/dev/null 2>&1; then
+    mkdir -p "${HOME}/.local/share/mime"
     update-mime-database "${HOME}/.local/share/mime" 2>/dev/null || true
 fi
 

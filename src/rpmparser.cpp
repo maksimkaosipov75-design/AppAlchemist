@@ -270,7 +270,10 @@ PackageMetadata RpmParser::parseMetadata(const QString& extractDir) {
         }
 
         if (!metadata.desktopExecCommand.isEmpty()) {
-            metadata.mainExecutable = resolveExecutableFromCommand(metadata.desktopExecCommand, filteredExecutables);
+            const QString resolvedExec = resolveExecutableFromCommand(metadata.desktopExecCommand, filteredExecutables);
+            if (!resolvedExec.isEmpty()) {
+                metadata.mainExecutable = resolvedExec;
+            }
         }
         
         // Prefer executable with same name as package
@@ -639,6 +642,18 @@ QString RpmParser::parseDesktopFile(const QString& desktopPath, PackageMetadata&
             if (QFileInfo::exists(fullPath)) {
                 metadata.mainExecutable = fullPath;
                 metadata.executables.append(fullPath);
+            } else {
+                QFileInfo fullPathInfo(fullPath);
+                if (fullPathInfo.isSymLink()) {
+                    QString linkTarget = fullPathInfo.symLinkTarget();
+                    if (linkTarget.startsWith("/")) {
+                        linkTarget = QString("%1%2").arg(dataDir).arg(linkTarget);
+                    }
+                    if (QFileInfo::exists(linkTarget)) {
+                        metadata.mainExecutable = linkTarget;
+                        metadata.executables.append(linkTarget);
+                    }
+                }
             }
         }
     }

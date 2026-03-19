@@ -1,5 +1,5 @@
 #include "cli_converter.h"
-#include <QApplication>
+#include <QCoreApplication>
 #include <QFileInfo>
 #include <QDir>
 #include <QProcess>
@@ -11,7 +11,56 @@
 #include <QRegularExpression>
 #include <QRegularExpressionMatch>
 #include <QTextStream>
+#include <QVector>
 #include <algorithm>
+
+namespace {
+
+QString normalizeDesktopMatchName(QString value) {
+    value = value.toLower();
+    value.replace(QRegularExpression("\\.desktop$"), "");
+    value.replace(QRegularExpression("(-|_)(latest|current|stable|installer|linux|amd64|x86_64|all|appimage)$",
+                                     QRegularExpression::CaseInsensitiveOption), "");
+    return value;
+}
+
+QStringList buildIconNameVariants(const QString& name) {
+    const QString original = name.trimmed();
+    if (original.isEmpty()) {
+        return {};
+    }
+
+    QStringList variants;
+    auto addVariant = [&variants](const QString& candidate) {
+        QString simplified = candidate.trimmed();
+        if (!simplified.isEmpty() && !variants.contains(simplified)) {
+            variants.append(simplified);
+        }
+    };
+
+    addVariant(original);
+    addVariant(original.toLower());
+    addVariant(QString(original).replace('.', '-'));
+    addVariant(QString(original).toLower().replace('.', '-'));
+    addVariant(QString(original).replace('.', '_'));
+    addVariant(QString(original).toLower().replace('.', '_'));
+
+    return variants;
+}
+
+QString legacySafeDesktopName(const QString& appName) {
+    QString safeName = appName;
+    safeName.replace(QRegularExpression("[^a-zA-Z0-9_-]"), "-");
+    return safeName.toLower();
+}
+
+QString normalizeDesktopIdentifier(QString value) {
+    value = value.toLower();
+    value.replace(QRegularExpression("[^a-z0-9]"), "");
+    return value;
+}
+
+}
 
 CliConverter::CliConverter(QObject* parent)
     : QObject(parent)
@@ -183,7 +232,7 @@ int CliConverter::convert(const QString& packagePath, const QString& outputDir, 
     // Use the main event loop to process queued signals
     logToFile("Processing pending events...");
     for (int i = 0; i < 30; ++i) {
-        QApplication::processEvents(QEventLoop::AllEvents, 200);
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 200);
         QThread::msleep(50); // Small delay between event processing
     }
     
@@ -383,6 +432,8 @@ void CliConverter::createDesktopEntry(const QString& appImagePath) {
     // Find .desktop file in extracted AppImage
     // First try usr/share/applications (standard location)
     QString desktopFile;
+    QString desktopFileName;
+    QString desktopBaseName;
     QDir squashfsRoot(QString("%1/squashfs-root").arg(tempDir));
     
     // Get expected app name from AppImage filename
@@ -395,9 +446,15 @@ void CliConverter::createDesktopEntry(const QString& appImagePath) {
         QDir applicationsDir(QString("%1/usr/share/applications").arg(squashfsRoot.absolutePath()));
         if (applicationsDir.exists()) {
             QStringList desktopFiles = applicationsDir.entryList({"*.desktop"}, QDir::Files);
-            
-            // First pass: try to find exact match or close match by name
-            QStringList candidates;
+
+            struct DesktopCandidate {
+                QString path;
+                QString fileName;
+                QString baseName;
+                int score = 0;
+            };
+
+            QVector<DesktopCandidate> candidates;
             for (const QString& file : desktopFiles) {
                 QString filePath = applicationsDir.absoluteFilePath(file);
                 QFile f(filePath);
@@ -409,49 +466,58 @@ void CliConverter::createDesktopEntry(const QString& appImagePath) {
                     QString fileLower = file.toLower();
                     QFileInfo fileInfo(file);
                     QString baseName = fileInfo.baseName().toLower();
+                    QString normalizedBaseName = normalizeDesktopMatchName(baseName);
                     // Skip if contains template-like patterns (numbers, texture, size indicators, etc.)
                     bool looksLikeTemplate = baseName.contains(QRegularExpression("\\d+k|\\d+bit|texture|\\d+x\\d+|template|example|sample|canon|nikon|dslr"));
-                    if (content.contains("NoDisplay=true") || content.contains("MimeType=") || 
-                        fileLower.contains("url-handler") || fileLower.contains("handler") ||
+                    bool looksLikeHandler = fileLower.contains("url-handler") || fileLower.contains("handler");
+                    if (looksLikeHandler ||
                         fileLower.contains("template") || fileLower.contains("example") ||
                         fileLower.contains("sample") || fileLower.contains("data/") ||
                         looksLikeTemplate || !content.contains("Type=Application")) {
                         continue;
                     }
-                    
-                    // Check if filename matches expected app name
-                    if (baseName == expectedAppName || baseName.contains(expectedAppName) || expectedAppName.contains(baseName)) {
-                        desktopFile = filePath;
-                        logToFile(QString("Found matching desktop file by name: %1").arg(file));
-                        break;
+
+                    DesktopCandidate candidate;
+                    candidate.path = filePath;
+                    candidate.fileName = file;
+                    candidate.baseName = fileInfo.baseName();
+
+                    if (normalizedBaseName == expectedAppName) {
+                        candidate.score += 100;
+                    } else if (normalizedBaseName.contains(expectedAppName) || expectedAppName.contains(normalizedBaseName)) {
+                        candidate.score += 60;
                     }
-                    
-                    candidates.append(filePath);
+
+                    if (content.contains("StartupWMClass=", Qt::CaseInsensitive)) {
+                        candidate.score += 20;
+                    }
+                    if (content.contains("Icon=", Qt::CaseInsensitive)) {
+                        candidate.score += 10;
+                    }
+                    if (!content.contains("NoDisplay=true", Qt::CaseInsensitive)) {
+                        candidate.score += 10;
+                    }
+                    if (!content.contains("MimeType=", Qt::CaseInsensitive)) {
+                        candidate.score += 5;
+                    }
+
+                    candidates.append(candidate);
                 }
             }
-            
-            // Second pass: if no exact match, use shortest candidate (main apps usually have shorter names)
-            // But exclude files that look like templates
-            if (desktopFile.isEmpty() && !candidates.isEmpty()) {
-                // Filter out template-like files
-                QStringList filteredCandidates;
-                for (const QString& candidate : candidates) {
-                    QString baseName = QFileInfo(candidate).baseName().toLower();
-                    bool looksLikeTemplate = baseName.contains(QRegularExpression("\\d+k|\\d+bit|texture|\\d+x\\d+|template|example|sample|canon|nikon|dslr"));
-                    if (!looksLikeTemplate) {
-                        filteredCandidates.append(candidate);
+
+            if (!candidates.isEmpty()) {
+                std::sort(candidates.begin(), candidates.end(), [](const DesktopCandidate& a, const DesktopCandidate& b) {
+                    if (a.score != b.score) {
+                        return a.score > b.score;
                     }
-                }
-                // If all were filtered, use original candidates
-                if (filteredCandidates.isEmpty()) {
-                    filteredCandidates = candidates;
-                }
-                // Sort by filename length (shorter = more likely to be main app)
-                std::sort(filteredCandidates.begin(), filteredCandidates.end(), [](const QString& a, const QString& b) {
-                    return QFileInfo(a).baseName().length() < QFileInfo(b).baseName().length();
+                    return a.baseName.length() < b.baseName.length();
                 });
-                desktopFile = filteredCandidates.first();
-                logToFile(QString("Using shortest desktop file: %1").arg(QFileInfo(desktopFile).fileName()));
+
+                const DesktopCandidate& bestCandidate = candidates.first();
+                desktopFile = bestCandidate.path;
+                desktopFileName = bestCandidate.fileName;
+                desktopBaseName = bestCandidate.baseName;
+                logToFile(QString("Selected desktop file: %1 (score=%2)").arg(desktopFileName).arg(bestCandidate.score));
             }
         }
         
@@ -545,7 +611,7 @@ void CliConverter::createDesktopEntry(const QString& appImagePath) {
                                 .arg(appImagePath);
         
         // Extract and install icon before adding Icon= line
-        QString iconName = extractAndInstallIcon(squashfsRoot, appImagePath, desktopContent);
+        QString iconName = extractAndInstallIcon(squashfsRoot, appImagePath, desktopContent, desktopBaseName);
         if (!iconName.isEmpty()) {
             desktopContent += QString("Icon=%1\n").arg(iconName);
         }
@@ -594,7 +660,7 @@ void CliConverter::createDesktopEntry(const QString& appImagePath) {
     }
     
     // Extract and install icon
-    QString iconName = extractAndInstallIcon(squashfsRoot, appImagePath, desktopContent);
+    QString iconName = extractAndInstallIcon(squashfsRoot, appImagePath, desktopContent, desktopBaseName);
     
     // Update Icon line in desktop content
     QRegularExpression iconRegex("^Icon=(.+)$", QRegularExpression::MultilineOption);
@@ -624,16 +690,23 @@ void CliConverter::createDesktopEntry(const QString& appImagePath) {
         desktopDirObj.mkpath(".");
     }
     
-    // Generate safe filename from app name
-    QString safeName = appName;
-    safeName.replace(QRegularExpression("[^a-zA-Z0-9_-]"), "-");
-    safeName = safeName.toLower();
-    if (safeName.isEmpty()) {
-        QFileInfo appImageInfo(appImagePath);
-        safeName = appImageInfo.baseName().toLower();
+    QString targetDesktopFileName = desktopFileName;
+    if (targetDesktopFileName.isEmpty()) {
+        QString safeName = appName;
+        safeName.replace(QRegularExpression("[^a-zA-Z0-9._-]"), "-");
+        safeName = safeName.toLower();
+        if (safeName.isEmpty()) {
+            QFileInfo appImageInfo(appImagePath);
+            safeName = appImageInfo.baseName().toLower();
+        }
+        targetDesktopFileName = QString("%1.desktop").arg(safeName);
     }
-    
-    QString targetDesktopPath = QString("%1/%2.desktop").arg(desktopDir).arg(safeName);
+
+    QString targetDesktopPath = QString("%1/%2").arg(desktopDir).arg(targetDesktopFileName);
+    if (desktopBaseName.isEmpty()) {
+        QFileInfo appImageInfo(appImagePath);
+        desktopBaseName = appImageInfo.baseName();
+    }
     
     // Write desktop file
     QFile targetDesktop(targetDesktopPath);
@@ -646,6 +719,43 @@ void CliConverter::createDesktopEntry(const QString& appImagePath) {
     QTextStream out(&targetDesktop);
     out << desktopContent;
     targetDesktop.close();
+
+    const QString legacyDesktopBaseName = legacySafeDesktopName(appName);
+    const QString normalizedExpectedId = normalizeDesktopIdentifier(appImageInfo.baseName());
+    const QString normalizedLegacyId = normalizeDesktopIdentifier(legacyDesktopBaseName);
+    const QString normalizedTargetId = normalizeDesktopIdentifier(QFileInfo(targetDesktopFileName).baseName());
+    const QStringList installedDesktopFiles = desktopDirObj.entryList({"*.desktop"}, QDir::Files);
+    for (const QString& installedDesktopFile : installedDesktopFiles) {
+        const QString installedDesktopPath = desktopDirObj.absoluteFilePath(installedDesktopFile);
+        if (installedDesktopPath == targetDesktopPath) {
+            continue;
+        }
+
+        const QString installedBaseName = QFileInfo(installedDesktopFile).baseName();
+        const QString normalizedInstalledId = normalizeDesktopIdentifier(installedBaseName);
+        const bool looksRelated = normalizedInstalledId == normalizedLegacyId ||
+                                  normalizedInstalledId.contains(normalizedExpectedId) ||
+                                  normalizedExpectedId.contains(normalizedInstalledId) ||
+                                  normalizedInstalledId == normalizedTargetId;
+        if (!looksRelated) {
+            continue;
+        }
+
+        QFile installedDesktop(installedDesktopPath);
+        if (!installedDesktop.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            continue;
+        }
+
+        const QString installedContent = installedDesktop.readAll();
+        installedDesktop.close();
+        if (installedContent.contains(QString("Exec=%1").arg(appImagePath))) {
+            if (QFile::remove(installedDesktopPath)) {
+                logToFile(QString("Removed legacy desktop entry: %1").arg(installedDesktopPath));
+            } else {
+                logToFile(QString("WARNING: Failed to remove legacy desktop entry: %1").arg(installedDesktopPath));
+            }
+        }
+    }
     
     // Make desktop file executable (required by some desktop environments)
     QFile::setPermissions(targetDesktopPath, QFile::ReadUser | QFile::WriteUser | QFile::ExeUser | 
@@ -669,7 +779,8 @@ void CliConverter::createDesktopEntry(const QString& appImagePath) {
     sendNotification("AppAlchemist", QString("Application added to menu: %1").arg(appName), "normal");
 }
 
-QString CliConverter::extractAndInstallIcon(const QDir& squashfsRoot, const QString& appImagePath, const QString& desktopContent) {
+QString CliConverter::extractAndInstallIcon(const QDir& squashfsRoot, const QString& appImagePath, const QString& desktopContent,
+                                           const QString& desktopBaseName) {
     // Extract icon name from desktop content
     QString iconName;
     QRegularExpression iconRegex("^Icon=(.+)$", QRegularExpression::MultilineOption);
@@ -688,10 +799,22 @@ QString CliConverter::extractAndInstallIcon(const QDir& squashfsRoot, const QStr
         iconName.replace(QRegularExpression("(-|_)(latest|current|stable|installer|linux|amd64|x86_64|all|AppImage)$", QRegularExpression::CaseInsensitiveOption), "");
     }
     
-    // Try common icon names (vscodium, codium, etc.)
-    QStringList iconNamesToTry = {iconName, "vscodium", "codium", "code"};
-    if (iconName != "vscodium") iconNamesToTry.prepend("vscodium");
-    if (iconName != "codium") iconNamesToTry.prepend("codium");
+    QStringList iconNamesToTry;
+    for (const QString& candidate : buildIconNameVariants(iconName)) {
+        if (!iconNamesToTry.contains(candidate)) {
+            iconNamesToTry.append(candidate);
+        }
+    }
+    for (const QString& candidate : buildIconNameVariants(desktopBaseName)) {
+        if (!iconNamesToTry.contains(candidate)) {
+            iconNamesToTry.append(candidate);
+        }
+    }
+    for (const QString& candidate : {QString("vscodium"), QString("codium"), QString("code")}) {
+        if (!iconNamesToTry.contains(candidate)) {
+            iconNamesToTry.append(candidate);
+        }
+    }
     
     // Try to find icon in AppImage
     QStringList iconExtensions = {"png", "svg", "xpm", "ico"};
@@ -978,4 +1101,3 @@ bool CliConverter::launchAppImage(const QString& appImagePath) {
     sendNotification("AppAlchemist Error", QString("Failed to launch %1").arg(QFileInfo(appImagePath).fileName()), "error");
     return false;
 }
-

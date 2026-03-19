@@ -42,7 +42,8 @@ private:
     void logToFile(const QString& message);
     bool launchAppImage(const QString& appImagePath);
     void createDesktopEntry(const QString& appImagePath);
-    QString extractAndInstallIcon(const QDir& squashfsRoot, const QString& appImagePath, const QString& desktopContent);
+    QString extractAndInstallIcon(const QDir& squashfsRoot, const QString& appImagePath, const QString& desktopContent,
+                                  const QString& desktopBaseName = QString());
     QString determineAppImagePath(const QString& packagePath, const QString& customOutputDir);
     
     PackageToAppImagePipeline* m_pipeline;
@@ -58,4 +59,3 @@ private:
 };
 
 #endif // CLI_CONVERTER_H
-
