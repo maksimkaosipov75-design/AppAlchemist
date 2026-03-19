@@ -12,13 +12,7 @@
 #include "appimagebuilder.h"
 #include "size_optimizer.h"
 #include "dependency_resolver.h"
-
-enum class PackageType {
-    DEB,
-    RPM,
-    TARBALL,
-    UNKNOWN
-};
+#include "package_profile.h"
 
 class PackageToAppImagePipeline : public QObject {
     Q_OBJECT
@@ -48,13 +42,29 @@ private slots:
     void process();
 
 private:
+    bool executeConversionPlan();
+    bool executeFastPath();
+    bool executeRepairPath();
+    bool executeFallbackPath();
+    bool shouldUseFastPath() const;
+    bool shouldUseRepairPath() const;
+    void logConversionPlan();
+    bool verifyAppDirReadiness(const QString& executablePath, bool requireDesktopEntry) const;
+    bool resolveAppDirDependencies(const QString& executablePath, const QString& stageLabel, bool requiredForSuccess);
+    bool optimizeBuiltAppDir(const QString& stageLabel);
+    bool packageBuiltAppDir(const QString& stageLabel);
+    QString findPrimaryAppDirExecutable() const;
+    QStringList findMissingRuntimeLibraries(const QString& executablePath) const;
+
     QString m_packagePath;
     QString m_outputPath;
     QString m_tempDir;
-    PackageType m_packageType;
+    PackageFormat m_packageType;
+    PackageProfile m_packageProfile;
+    ConversionPlan m_conversionPlan;
     bool m_cancelled;
     
-    PackageType detectPackageType(const QString& packagePath);
+    PackageFormat detectPackageType(const QString& packagePath);
     bool validateInput();
     bool extractPackage();
     bool analyzeDependencies();
@@ -80,8 +90,3 @@ private:
 };
 
 #endif // PACKAGETOAPPIMAGEPIPELINE_H
-
-
-
-
-
