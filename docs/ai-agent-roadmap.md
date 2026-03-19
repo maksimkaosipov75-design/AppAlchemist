@@ -20,7 +20,7 @@ Preserve the current "double-click package -> short wait -> usable app on Arch/C
 - `repair path` currently targets Electron, Java, Python, and Chrome-style packages.
 
 ## Immediate Next Steps
-1. Pending commit only: behavior has been re-checked on `packaging/arch/appalchemist-1.0.0.tar.gz`, but the runtime-probe changes are still not committed.
+1. Done in commit `e7e090c`: runtime-probe changes were re-checked on `packaging/arch/appalchemist-1.0.0.tar.gz` and committed.
 2. Done: move runtime probe policy into a separate helper/class instead of keeping it inside `PackageToAppImagePipeline`.
 3. Done: add profile-specific non-GUI smoke checks:
    - Electron: launcher/resources/sandbox helper checks
@@ -37,11 +37,12 @@ Preserve the current "double-click package -> short wait -> usable app on Arch/C
   - Python packages verify interpreter and script resolution before probing
   - Java packages verify JAR plus bundled/system Java readiness before probing
 - A local smoke test already succeeded for `packaging/arch/appalchemist-1.0.0.tar.gz`, producing `/tmp/appalchemist-roadmap-smoke/appalchemist-1.AppImage`.
-- The remaining immediate task is to commit the verified runtime-probe work.
+- Conversion cache metadata is now written and read via `CacheManager` using package-hash keyed JSON records, with legacy file/mtime lookup kept as a fallback path.
+- Tarballs are now classified into explicit subtypes in `PackageProfile`, improving planning and logging for portable bundles, installer archives, source archives, and self-contained app bundles.
 
 ## Mid-Term Steps
-1. Add persistent package-hash based conversion cache metadata, not only cached AppImage file lookup.
-2. Add tarball subtype classification:
+1. Implemented in code: add persistent package-hash based conversion cache metadata, not only cached AppImage file lookup.
+2. Implemented in code: add tarball subtype classification:
    - portable binary tarball
    - installer tarball
    - source tarball

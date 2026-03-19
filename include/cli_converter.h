@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QString>
 #include <QThread>
+#include <QPointer>
 #include <QFile>
 #include <QTextStream>
 #include <QStandardPaths>
@@ -38,6 +39,7 @@ private slots:
     void onPipelineFinished();
 
 private:
+    void cleanupPipelineObjects();
     void setupLogging();
     void logToFile(const QString& message);
     bool launchAppImage(const QString& appImagePath);
@@ -46,8 +48,8 @@ private:
                                   const QString& desktopBaseName = QString());
     QString determineAppImagePath(const QString& packagePath, const QString& customOutputDir);
     
-    PackageToAppImagePipeline* m_pipeline;
-    QThread* m_pipelineThread;
+    QPointer<PackageToAppImagePipeline> m_pipeline;
+    QPointer<QThread> m_pipelineThread;
     QFile* m_logFile;
     QTextStream* m_logStream;
     QString m_packagePath;

@@ -3,11 +3,16 @@
 #include <QDir>
 #include <QDirIterator>
 #include <QFileInfo>
+#include <QRegularExpression>
 
 QString PackageProfile::summary() const {
     QStringList parts;
     parts << QString("format=%1").arg(PackageClassifier::formatToString(format));
     parts << QString("profile=%1").arg(PackageClassifier::applicationProfileToString(applicationProfile));
+
+    if (format == PackageFormat::Tarball && tarballSubtype != TarballSubtype::None) {
+        parts << QString("tarball=%1").arg(PackageClassifier::tarballSubtypeToString(tarballSubtype));
+    }
 
     if (!mainExecutable.isEmpty()) {
         parts << QString("main=%1").arg(mainExecutable);
@@ -55,6 +60,31 @@ PackageProfile PackageClassifier::classify(const QString& packagePath,
     profile.packageName = metadata.package;
     profile.mainExecutable = resolvePrimaryExecutable(extractedDir, metadata);
     profile.desktopEntryPresent = containsDesktopEntry(extractedDir);
+    if (format == PackageFormat::Tarball) {
+        profile.tarballSubtype = detectTarballSubtype(extractedDir,
+                                                      metadata,
+                                                      profile.desktopEntryPresent,
+                                                      profile.mainExecutable);
+        switch (profile.tarballSubtype) {
+        case TarballSubtype::PortableBinary:
+            profile.indicators << "portable-tarball";
+            break;
+        case TarballSubtype::InstallerArchive:
+            profile.indicators << "installer-tarball";
+            break;
+        case TarballSubtype::SourceArchive:
+            profile.indicators << "source-tarball";
+            break;
+        case TarballSubtype::SelfContainedAppBundle:
+            profile.indicators << "app-bundle";
+            break;
+        case TarballSubtype::Unknown:
+            profile.indicators << "tarball-unknown";
+            break;
+        case TarballSubtype::None:
+            break;
+        }
+    }
 
     if (isLikelyServicePackage(extractedDir, metadata)) {
         profile.applicationProfile = ApplicationProfile::Service;
@@ -63,11 +93,16 @@ PackageProfile PackageClassifier::classify(const QString& packagePath,
         return profile;
     }
 
-    if (format == PackageFormat::Tarball && hasSelfContainedLaunchFiles(extractedDir)) {
+    if (format == PackageFormat::Tarball &&
+        (profile.tarballSubtype == TarballSubtype::PortableBinary ||
+         profile.tarballSubtype == TarballSubtype::SelfContainedAppBundle ||
+         hasSelfContainedLaunchFiles(extractedDir))) {
         profile.applicationProfile = ApplicationProfile::SelfContainedTarball;
         profile.supportsFastPath = true;
         profile.isGraphical = profile.desktopEntryPresent;
-        profile.indicators << "portable-layout";
+        if (profile.tarballSubtype == TarballSubtype::PortableBinary) {
+            profile.indicators << "portable-layout";
+        }
     }
 
     if (!profile.mainExecutable.isEmpty() && QFileInfo::exists(profile.mainExecutable)) {
@@ -116,6 +151,11 @@ PackageProfile PackageClassifier::classify(const QString& packagePath,
     }
 
     if (profile.applicationProfile == ApplicationProfile::Unknown) {
+        if (format == PackageFormat::Tarball &&
+            (profile.tarballSubtype == TarballSubtype::SourceArchive ||
+             profile.tarballSubtype == TarballSubtype::InstallerArchive)) {
+            profile.likelyUnsupported = true;
+        }
         if (isLikelyCliOnly(profile.mainExecutable, profile.desktopEntryPresent)) {
             profile.applicationProfile = ApplicationProfile::NativeCli;
             profile.supportsFastPath = true;
@@ -150,6 +190,25 @@ QString PackageClassifier::formatToString(PackageFormat format) {
     case PackageFormat::Tarball:
         return "tarball";
     case PackageFormat::Unknown:
+        return "unknown";
+    }
+
+    return "unknown";
+}
+
+QString PackageClassifier::tarballSubtypeToString(TarballSubtype subtype) {
+    switch (subtype) {
+    case TarballSubtype::None:
+        return "none";
+    case TarballSubtype::PortableBinary:
+        return "portable-binary";
+    case TarballSubtype::InstallerArchive:
+        return "installer-archive";
+    case TarballSubtype::SourceArchive:
+        return "source-archive";
+    case TarballSubtype::SelfContainedAppBundle:
+        return "self-contained-app-bundle";
+    case TarballSubtype::Unknown:
         return "unknown";
     }
 
@@ -201,7 +260,15 @@ ConversionPlan PackageClassifier::buildPlan(const PackageProfile& profile) {
 
     if (profile.likelyUnsupported) {
         plan.initialMode = ConversionMode::LegacyFallback;
-        plan.reasons << "unsupported-profile";
+        if (profile.format == PackageFormat::Tarball &&
+            profile.tarballSubtype == TarballSubtype::SourceArchive) {
+            plan.reasons << "source-tarball";
+        } else if (profile.format == PackageFormat::Tarball &&
+                   profile.tarballSubtype == TarballSubtype::InstallerArchive) {
+            plan.reasons << "installer-tarball";
+        } else {
+            plan.reasons << "unsupported-profile";
+        }
         return plan;
     }
 
@@ -309,6 +376,75 @@ bool PackageClassifier::isLikelyServicePackage(const QString& extractedDir,
     }
 
     return false;
+}
+
+TarballSubtype PackageClassifier::detectTarballSubtype(const QString& extractedDir,
+                                                       const PackageMetadata& metadata,
+                                                       bool desktopEntryPresent,
+                                                       const QString& mainExecutable) {
+    const QString dataDir = QDir(extractedDir).absoluteFilePath("data");
+    const QStringList appBundleMarkers = {
+        QDir(dataDir).absoluteFilePath("AppRun"),
+        QDir(dataDir).absoluteFilePath(".DirIcon")
+    };
+    for (const QString& marker : appBundleMarkers) {
+        if (QFileInfo::exists(marker)) {
+            return TarballSubtype::SelfContainedAppBundle;
+        }
+    }
+
+    QDirIterator appImageIt(dataDir, {"*.AppImage"}, QDir::Files, QDirIterator::Subdirectories);
+    if (appImageIt.hasNext()) {
+        return TarballSubtype::SelfContainedAppBundle;
+    }
+
+    const QStringList installerPatterns = {
+        "install.sh", "installer.sh", "setup.sh", "install", "setup", "*.run"
+    };
+    for (const QString& pattern : installerPatterns) {
+        QDirIterator it(dataDir, {pattern}, QDir::Files, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            const QString path = it.next();
+            const QFileInfo info(path);
+            const QString lowerName = info.fileName().toLower();
+            if (lowerName == "install" && !info.isExecutable()) {
+                continue;
+            }
+            return TarballSubtype::InstallerArchive;
+        }
+    }
+
+    const QStringList sourcePatterns = {
+        "CMakeLists.txt", "configure", "configure.ac", "meson.build",
+        "pyproject.toml", "setup.py", "Cargo.toml", "Makefile"
+    };
+    bool hasSourceMarkers = false;
+    for (const QString& pattern : sourcePatterns) {
+        QDirIterator it(dataDir, {pattern}, QDir::Files, QDirIterator::Subdirectories);
+        if (it.hasNext()) {
+            hasSourceMarkers = true;
+            break;
+        }
+    }
+
+    const bool hasSourceDirs = QDir(dataDir).exists("src")
+        || QDir(dataDir).exists("include")
+        || QDir(dataDir).exists("cmake")
+        || QDir(dataDir).exists(".git");
+
+    if ((hasSourceMarkers || hasSourceDirs) &&
+        metadata.executables.isEmpty() &&
+        !desktopEntryPresent &&
+        mainExecutable.isEmpty()) {
+        return TarballSubtype::SourceArchive;
+    }
+
+    if (hasSelfContainedLaunchFiles(extractedDir) ||
+        (!metadata.executables.isEmpty() && !desktopEntryPresent)) {
+        return TarballSubtype::PortableBinary;
+    }
+
+    return TarballSubtype::Unknown;
 }
 
 bool PackageClassifier::isLikelyCliOnly(const QString& mainExecutable,

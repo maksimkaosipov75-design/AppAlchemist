@@ -40,8 +40,7 @@ PackageToAppImagePipeline::~PackageToAppImagePipeline() {
     delete m_tarballParser;
     delete m_analyzer;
     delete m_appDirBuilder;
-    delete m_appImageBuilder;
-    // m_sizeOptimizer is deleted by QObject parent
+    // QObject children are deleted by QObject parent ownership.
 }
 
 void PackageToAppImagePipeline::setPackagePath(const QString& packagePath) {

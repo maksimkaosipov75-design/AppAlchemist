@@ -9,6 +9,10 @@
 #include <QJsonArray>
 #include <QDateTime>
 
+bool CachedConversionMetadata::isValid() const {
+    return !packageHash.isEmpty() && !appImagePath.isEmpty();
+}
+
 CacheManager::CacheManager() {
 }
 
@@ -121,17 +125,149 @@ bool CacheManager::shouldRebuild(const QString& packagePath, const QString& cach
 }
 
 QString CacheManager::getValidCachedAppImage(const QString& packagePath) {
-    QString cachedPath = getAppImagePath(packagePath);
-    
+    const CachedConversionMetadata metadata = getConversionMetadata(packagePath);
+    if (metadata.isValid()) {
+        const QFileInfo appImageInfo(metadata.appImagePath);
+        if (appImageInfo.exists() && appImageInfo.isFile()) {
+            return appImageInfo.absoluteFilePath();
+        }
+    }
+
+    const QString cachedPath = getAppImagePath(packagePath);
     if (!hasCachedAppImage(packagePath)) {
-        return QString(); // No cache exists
+        return QString();
     }
-    
+
     if (shouldRebuild(packagePath, cachedPath)) {
-        return QString(); // Cache is outdated
+        return QString();
     }
-    
-    return cachedPath; // Valid cache exists
+
+    return cachedPath;
+}
+
+QString CacheManager::calculatePackageHash(const QString& packagePath) {
+    return SubprocessWrapper::generateHash(packagePath);
+}
+
+QString CacheManager::getConversionCacheDirectory() {
+    QString cacheDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    if (cacheDir.isEmpty()) {
+        cacheDir = QDir::homePath() + "/.cache";
+    }
+
+    const QString conversionCacheDir = QString("%1/appalchemist/conversion_cache").arg(cacheDir);
+    QDir dir;
+    if (!dir.exists(conversionCacheDir)) {
+        dir.mkpath(conversionCacheDir);
+    }
+
+    return conversionCacheDir;
+}
+
+QString CacheManager::getConversionMetadataPath(const QString& packagePath) {
+    const QString packageHash = calculatePackageHash(packagePath);
+    if (packageHash.isEmpty()) {
+        return QString();
+    }
+
+    return QString("%1/%2.json").arg(getConversionCacheDirectory(), packageHash);
+}
+
+bool CacheManager::storeConversionMetadata(const QString& packagePath, const QString& appImagePath) {
+    QFileInfo packageInfo(packagePath);
+    QFileInfo appImageInfo(appImagePath);
+    if (!packageInfo.exists() || !packageInfo.isFile() || !appImageInfo.exists() || !appImageInfo.isFile()) {
+        return false;
+    }
+
+    const QString packageHash = calculatePackageHash(packagePath);
+    if (packageHash.isEmpty()) {
+        return false;
+    }
+
+    const QString metadataPath = getConversionMetadataPath(packagePath);
+    if (metadataPath.isEmpty()) {
+        return false;
+    }
+
+    QJsonObject obj;
+    obj["package_path"] = packageInfo.absoluteFilePath();
+    obj["package_hash"] = packageHash;
+    obj["package_size"] = QString::number(packageInfo.size());
+    obj["package_last_modified_ms"] = QString::number(packageInfo.lastModified().toMSecsSinceEpoch());
+    obj["appimage_path"] = appImageInfo.absoluteFilePath();
+    obj["appimage_hash"] = calculateBinaryHash(appImageInfo.absoluteFilePath());
+    obj["created_at_ms"] = QString::number(QDateTime::currentMSecsSinceEpoch());
+
+    QFile file(metadataPath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        return false;
+    }
+
+    file.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
+    file.close();
+    return true;
+}
+
+CachedConversionMetadata CacheManager::getConversionMetadata(const QString& packagePath) {
+    CachedConversionMetadata metadata;
+
+    QFileInfo packageInfo(packagePath);
+    if (!packageInfo.exists() || !packageInfo.isFile()) {
+        return metadata;
+    }
+
+    const QString metadataPath = getConversionMetadataPath(packagePath);
+    if (metadataPath.isEmpty()) {
+        return metadata;
+    }
+
+    QFile file(metadataPath);
+    if (!file.exists() || !file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return metadata;
+    }
+
+    const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    file.close();
+    if (doc.isNull() || !doc.isObject()) {
+        return CachedConversionMetadata();
+    }
+
+    const QJsonObject obj = doc.object();
+    metadata.packagePath = obj.value("package_path").toString();
+    metadata.packageHash = obj.value("package_hash").toString();
+    metadata.packageSize = obj.value("package_size").toString().toLongLong();
+    metadata.packageLastModifiedMs = obj.value("package_last_modified_ms").toString().toLongLong();
+    metadata.appImagePath = obj.value("appimage_path").toString();
+    metadata.appImageHash = obj.value("appimage_hash").toString();
+    metadata.createdAtMs = obj.value("created_at_ms").toString().toLongLong();
+
+    if (!metadata.isValid()) {
+        return CachedConversionMetadata();
+    }
+
+    const qint64 currentPackageSize = packageInfo.size();
+    const qint64 currentPackageMtime = packageInfo.lastModified().toMSecsSinceEpoch();
+    if (metadata.packageSize != currentPackageSize ||
+        metadata.packageLastModifiedMs != currentPackageMtime) {
+        return CachedConversionMetadata();
+    }
+
+    if (metadata.packageHash != calculatePackageHash(packagePath)) {
+        return CachedConversionMetadata();
+    }
+
+    QFileInfo appImageInfo(metadata.appImagePath);
+    if (!appImageInfo.exists() || !appImageInfo.isFile()) {
+        return CachedConversionMetadata();
+    }
+
+    if (!metadata.appImageHash.isEmpty() &&
+        metadata.appImageHash != calculateBinaryHash(appImageInfo.absoluteFilePath())) {
+        return CachedConversionMetadata();
+    }
+
+    return metadata;
 }
 
 QString CacheManager::calculateBinaryHash(const QString& binaryPath) {
@@ -209,5 +345,4 @@ void CacheManager::setLddCache(const QString& binaryHash, const QStringList& ldd
         file.close();
     }
 }
-
 

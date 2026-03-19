@@ -12,6 +12,15 @@ enum class PackageFormat {
     Unknown
 };
 
+enum class TarballSubtype {
+    None,
+    PortableBinary,
+    InstallerArchive,
+    SourceArchive,
+    SelfContainedAppBundle,
+    Unknown
+};
+
 enum class ApplicationProfile {
     Unknown,
     NativeDesktop,
@@ -34,6 +43,7 @@ enum class ConversionMode {
 struct PackageProfile {
     PackageFormat format = PackageFormat::Unknown;
     ApplicationProfile applicationProfile = ApplicationProfile::Unknown;
+    TarballSubtype tarballSubtype = TarballSubtype::None;
     QString packagePath;
     QString packageName;
     QString mainExecutable;
@@ -65,6 +75,7 @@ public:
                                    const PackageMetadata& metadata);
 
     static QString formatToString(PackageFormat format);
+    static QString tarballSubtypeToString(TarballSubtype subtype);
     static QString applicationProfileToString(ApplicationProfile profile);
     static QString conversionModeToString(ConversionMode mode);
     static ConversionPlan buildPlan(const PackageProfile& profile);
@@ -76,6 +87,10 @@ private:
     static bool hasSelfContainedLaunchFiles(const QString& extractedDir);
     static bool isLikelyServicePackage(const QString& extractedDir,
                                        const PackageMetadata& metadata);
+    static TarballSubtype detectTarballSubtype(const QString& extractedDir,
+                                               const PackageMetadata& metadata,
+                                               bool desktopEntryPresent,
+                                               const QString& mainExecutable);
     static bool isLikelyCliOnly(const QString& mainExecutable,
                                 bool desktopEntryPresent);
 };

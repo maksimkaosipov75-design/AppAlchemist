@@ -75,14 +75,7 @@ CliConverter::CliConverter(QObject* parent)
 }
 
 CliConverter::~CliConverter() {
-    if (m_pipelineThread) {
-        m_pipelineThread->quit();
-        m_pipelineThread->wait();
-        delete m_pipelineThread;
-    }
-    if (m_pipeline) {
-        delete m_pipeline;
-    }
+    cleanupPipelineObjects();
     if (m_logStream) {
         delete m_logStream;
     }
@@ -90,6 +83,19 @@ CliConverter::~CliConverter() {
         m_logFile->close();
         delete m_logFile;
     }
+}
+
+void CliConverter::cleanupPipelineObjects() {
+    if (m_pipelineThread) {
+        if (m_pipelineThread->isRunning()) {
+            m_pipelineThread->quit();
+            m_pipelineThread->wait();
+        }
+        delete m_pipelineThread;
+        m_pipelineThread = nullptr;
+    }
+
+    m_pipeline = nullptr;
 }
 
 void CliConverter::setupLogging() {
@@ -134,6 +140,8 @@ void CliConverter::sendNotification(const QString& title, const QString& message
 }
 
 int CliConverter::convert(const QString& packagePath, const QString& outputDir, bool autoLaunch) {
+    cleanupPipelineObjects();
+
     QElapsedTimer timer;
     timer.start();
     
@@ -158,6 +166,12 @@ int CliConverter::convert(const QString& packagePath, const QString& outputDir, 
     QString cachedAppImage = CacheManager::getValidCachedAppImage(packagePath);
     if (!cachedAppImage.isEmpty()) {
         logToFile(QString("Using cached AppImage: %1").arg(cachedAppImage));
+        const CachedConversionMetadata metadata = CacheManager::getConversionMetadata(packagePath);
+        if (metadata.isValid()) {
+            logToFile(QString("Cache metadata matched package hash: %1").arg(metadata.packageHash));
+        } else {
+            logToFile("Cache hit used legacy file/mtime validation (no matching metadata record).");
+        }
         sendNotification("AppAlchemist", QString("Using cached AppImage for %1").arg(packageInfo.fileName()), "normal");
         
         m_resultAppImagePath = cachedAppImage;
@@ -192,6 +206,12 @@ int CliConverter::convert(const QString& packagePath, const QString& outputDir, 
     connect(m_pipeline, &PackageToAppImagePipeline::success, this, &CliConverter::onSuccess, Qt::QueuedConnection);
     connect(m_pipeline, &PackageToAppImagePipeline::finished, this, &CliConverter::onPipelineFinished, Qt::QueuedConnection);
     connect(m_pipelineThread, &QThread::finished, m_pipeline, &QObject::deleteLater);
+    connect(m_pipeline, &QObject::destroyed, this, [this]() {
+        m_pipeline = nullptr;
+    });
+    connect(m_pipelineThread, &QObject::destroyed, this, [this]() {
+        m_pipelineThread = nullptr;
+    });
     
     // Set paths
     m_pipeline->setPackagePath(packagePath);
@@ -397,6 +417,11 @@ void CliConverter::onError(const QString& errorMessage) {
 
 void CliConverter::onSuccess(const QString& appImagePath) {
     logToFile(QString("SUCCESS: AppImage created at %1").arg(appImagePath));
+    if (CacheManager::storeConversionMetadata(m_packagePath, appImagePath)) {
+        logToFile(QString("Stored conversion cache metadata for package: %1").arg(m_packagePath));
+    } else {
+        logToFile(QString("WARNING: Failed to store conversion cache metadata for package: %1").arg(m_packagePath));
+    }
     sendNotification("AppAlchemist", QString("Successfully converted to AppImage"), "normal");
     // Set success flag and path immediately
     m_success = true;
@@ -405,7 +430,9 @@ void CliConverter::onSuccess(const QString& appImagePath) {
 }
 
 void CliConverter::onPipelineFinished() {
-    // Cleanup is handled in destructor
+    if (m_pipelineThread) {
+        m_pipelineThread->quit();
+    }
 }
 
 void CliConverter::createDesktopEntry(const QString& appImagePath) {
