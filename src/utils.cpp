@@ -279,6 +279,15 @@ QString extractDesktopExecBinary(const QString& execCommand) {
             continue;
         }
 
+        if (token == "-jar") {
+            skipNext = true;
+            continue;
+        }
+
+        if (token.startsWith('-')) {
+            continue;
+        }
+
         if (token.contains('=') && !token.startsWith('/') && !token.startsWith("./") && !token.startsWith("../")) {
             continue;
         }
@@ -296,6 +305,20 @@ QString extractDesktopExecBinary(const QString& execCommand) {
 }
 
 QString resolveExecutableFromCommand(const QString& execCommand, const QStringList& executables) {
+    const QRegularExpression jarRegex(R"((\"[^\"]+\.jar\"|'[^']+\.jar'|[^\s]+\.jar))");
+    const QRegularExpressionMatch jarMatch = jarRegex.match(execCommand);
+    if (jarMatch.hasMatch()) {
+        const QString jarToken = stripQuotes(jarMatch.captured(1));
+        const QFileInfo jarInfo(jarToken);
+        const QString jarName = jarInfo.fileName().toLower();
+        for (const QString& exec : executables) {
+            const QFileInfo execInfo(exec);
+            if (exec == jarToken || exec.endsWith(jarToken) || execInfo.fileName().toLower() == jarName) {
+                return exec;
+            }
+        }
+    }
+
     const QString token = extractDesktopExecBinary(execCommand);
     if (token.isEmpty()) {
         return QString();

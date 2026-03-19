@@ -26,6 +26,7 @@ private:
                         const QStringList& executables);
     bool copyLibraries(const QString& appDirPath, const QStringList& libraries);
     bool copyResources(const QString& appDirPath, const QString& extractedDebDir);
+    bool copyMissingDirectoryContents(const QString& sourcePath, const QString& targetPath);
 };
 
 #endif // APPDIRBUILDER_H

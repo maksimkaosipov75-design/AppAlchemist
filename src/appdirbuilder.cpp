@@ -776,6 +776,7 @@ bool AppDirBuilder::copyLibraries(const QString& appDirPath, const QStringList& 
 bool AppDirBuilder::copyResources(const QString& appDirPath, const QString& extractedDebDir) {
     QStringList resourceDirs = {
         "usr/lib",
+        "usr/games",
         // Note: usr/games is handled separately to preserve structure for Java apps
         "opt"
     };
@@ -927,15 +928,9 @@ bool AppDirBuilder::copyResources(const QString& appDirPath, const QString& extr
                     QString subdirSource = sourceDir.absoluteFilePath(subdir);
                     QString subdirTarget = targetDir.absoluteFilePath(subdir);
                     
-                    // Only copy if target doesn't exist or is empty
-                    QDir subdirTargetDir(subdirTarget);
-                    if (!subdirTargetDir.exists() || subdirTargetDir.entryList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot).isEmpty()) {
-                        qDebug() << "Copying usr/games subdirectory:" << subdir;
-                        if (!SubprocessWrapper::copyDirectory(subdirSource, subdirTarget)) {
-                            qWarning() << "Failed to copy usr/games subdirectory:" << subdir;
-                        }
-                    } else {
-                        qDebug() << "Skipping usr/games subdirectory (already exists):" << subdir;
+                    qDebug() << "Merging usr/games subdirectory:" << subdir;
+                    if (!copyMissingDirectoryContents(subdirSource, subdirTarget)) {
+                        qWarning() << "Failed to merge usr/games subdirectory:" << subdir;
                     }
                 }
             } else {
@@ -948,6 +943,45 @@ bool AppDirBuilder::copyResources(const QString& appDirPath, const QString& extr
         }
     }
     
+    return true;
+}
+
+bool AppDirBuilder::copyMissingDirectoryContents(const QString& sourcePath, const QString& targetPath) {
+    QDir sourceDir(sourcePath);
+    if (!sourceDir.exists()) {
+        return false;
+    }
+
+    QDir targetDir(targetPath);
+    if (!targetDir.exists() && !targetDir.mkpath(".")) {
+        return false;
+    }
+
+    const QFileInfoList entries = sourceDir.entryInfoList(
+        QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot
+    );
+
+    for (const QFileInfo& entry : entries) {
+        const QString sourceEntryPath = entry.absoluteFilePath();
+        const QString targetEntryPath = targetDir.absoluteFilePath(entry.fileName());
+
+        if (entry.isDir() && !entry.isSymLink()) {
+            if (!copyMissingDirectoryContents(sourceEntryPath, targetEntryPath)) {
+                return false;
+            }
+            continue;
+        }
+
+        if (QFileInfo::exists(targetEntryPath) || QFileInfo(targetEntryPath).isSymLink()) {
+            continue;
+        }
+
+        if (!SubprocessWrapper::copyFile(sourceEntryPath, targetEntryPath)) {
+            qWarning() << "Failed to copy missing resource:" << sourceEntryPath << "to" << targetEntryPath;
+            return false;
+        }
+    }
+
     return true;
 }
 
