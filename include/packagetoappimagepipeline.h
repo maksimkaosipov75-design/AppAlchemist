@@ -13,6 +13,7 @@
 #include "size_optimizer.h"
 #include "dependency_resolver.h"
 #include "package_profile.h"
+#include "runtime_probe.h"
 
 class PackageToAppImagePipeline : public QObject {
     Q_OBJECT
@@ -53,8 +54,7 @@ private:
     bool resolveAppDirDependencies(const QString& executablePath, const QString& stageLabel, bool requiredForSuccess);
     bool optimizeBuiltAppDir(const QString& stageLabel);
     bool packageBuiltAppDir(const QString& stageLabel);
-    bool probeAppDirRuntime(const QString& stageLabel, bool requiredForSuccess);
-    bool probeAppRunSyntax(const QString& appRunPath) const;
+    bool runRuntimeProbe(const QString& executablePath, const QString& stageLabel, bool requiredForSuccess);
     QString findPrimaryAppDirExecutable() const;
     QStringList findMissingRuntimeLibraries(const QString& executablePath) const;
 

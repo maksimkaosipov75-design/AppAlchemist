@@ -6,6 +6,7 @@
 #include <QDebug>
 #include <QDateTime>
 #include <QFileInfo>
+#include <QFile>
 #include <QMetaObject>
 #include <QRegularExpression>
 
@@ -267,7 +268,7 @@ bool PackageToAppImagePipeline::executeFastPath() {
         return false;
     }
 
-    if (!probeAppDirRuntime("Fast path", m_packageProfile.applicationProfile == ApplicationProfile::NativeCli)) {
+    if (!runRuntimeProbe(mainExec, "Fast path", m_packageProfile.applicationProfile == ApplicationProfile::NativeCli)) {
         return false;
     }
 
@@ -328,7 +329,7 @@ bool PackageToAppImagePipeline::executeRepairPath() {
         return false;
     }
 
-    if (!probeAppDirRuntime("Repair path", false)) {
+    if (!runRuntimeProbe(mainExec, "Repair path", false)) {
         return false;
     }
 
@@ -359,19 +360,9 @@ bool PackageToAppImagePipeline::executeFallbackPath() {
         return false;
     }
 
-    if (m_dependencySettings.enabled) {
-        QString mainExec;
-        if (!m_metadata.executables.isEmpty()) {
-            mainExec = m_appDirPath + "/usr/bin/" + QFileInfo(m_metadata.executables.first()).fileName();
-            if (!QFileInfo::exists(mainExec)) {
-                QDir binDir(m_appDirPath + "/usr/bin");
-                QStringList execs = binDir.entryList(QDir::Files | QDir::Executable);
-                if (!execs.isEmpty()) {
-                    mainExec = binDir.absoluteFilePath(execs.first());
-                }
-            }
-        }
+    const QString mainExec = findPrimaryAppDirExecutable();
 
+    if (m_dependencySettings.enabled) {
         if (mainExec.isEmpty() || !QFileInfo::exists(mainExec)) {
             emit log("WARNING: Could not find main executable for dependency analysis");
         } else if (!resolveAppDirDependencies(mainExec, "Fallback path", false)) {
@@ -391,7 +382,7 @@ bool PackageToAppImagePipeline::executeFallbackPath() {
         return false;
     }
 
-    if (!probeAppDirRuntime("Fallback path", false)) {
+    if (!runRuntimeProbe(mainExec, "Fallback path", false)) {
         emit log("WARNING: Fallback runtime probe reported issues, continuing to package anyway");
     }
 
@@ -498,87 +489,47 @@ bool PackageToAppImagePipeline::packageBuiltAppDir(const QString& stageLabel) {
     return true;
 }
 
-bool PackageToAppImagePipeline::probeAppDirRuntime(const QString& stageLabel, bool requiredForSuccess) {
-    const QString appRunPath = QDir(m_appDirPath).absoluteFilePath("AppRun");
-    if (!QFileInfo::exists(appRunPath)) {
-        emit log(QString("%1 runtime probe skipped: AppRun is missing.").arg(stageLabel));
-        return !requiredForSuccess;
-    }
-
-    if (!probeAppRunSyntax(appRunPath)) {
-        emit log(QString("%1 runtime probe failed: AppRun syntax check failed.").arg(stageLabel));
-        return !requiredForSuccess ? false : false;
-    }
-
-    if (m_packageProfile.applicationProfile != ApplicationProfile::NativeCli &&
-        m_packageProfile.applicationProfile != ApplicationProfile::Script) {
-        emit log(QString("%1 runtime probe: syntax check passed; live probe skipped for non-CLI profile.")
-                 .arg(stageLabel));
-        return true;
-    }
-
+bool PackageToAppImagePipeline::runRuntimeProbe(const QString& executablePath,
+                                                const QString& stageLabel,
+                                                bool requiredForSuccess) {
     emit progress(80, "Running AppDir probe...");
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    env.insert("APPDIR", m_appDirPath);
-    env.insert("HERE", m_appDirPath);
-    env.insert("LD_LIBRARY_PATH", QString("%1/usr/lib:%2").arg(m_appDirPath, env.value("LD_LIBRARY_PATH")));
-    env.insert("PATH", QString("%1/usr/bin:%2/usr/sbin:%3/usr/games:%4")
-               .arg(m_appDirPath, m_appDirPath, m_appDirPath, env.value("PATH")));
-    env.insert("NO_AT_BRIDGE", "1");
 
-    const ProcessResult probeResult = SubprocessWrapper::execute(
-        appRunPath,
-        {"--help"},
-        m_appDirPath,
-        2000,
-        env);
+    const RuntimeProbeResult probeResult = RuntimeProbePolicy::probe(m_appDirPath,
+                                                                     m_packageProfile,
+                                                                     m_metadata,
+                                                                     executablePath);
+
+    emit log(QString("%1 runtime probe summary: %2").arg(stageLabel, probeResult.summary()));
+    if (!probeResult.commandSummary().isEmpty()) {
+        emit log(QString("%1 runtime probe command: %2").arg(stageLabel, probeResult.commandSummary()));
+    }
+
+    for (const QString& check : probeResult.checks) {
+        emit log(QString("%1 runtime probe check: %2").arg(stageLabel, check));
+    }
+
+    for (const QString& warning : probeResult.warnings) {
+        emit log(QString("%1 runtime probe warning: %2").arg(stageLabel, warning));
+    }
+
+    if (!probeResult.stdoutOutput.isEmpty()) {
+        emit log(QString("%1 runtime probe stdout: %2").arg(stageLabel, probeResult.stdoutOutput));
+    }
+
+    if (!probeResult.stderrOutput.isEmpty()) {
+        emit log(QString("%1 runtime probe stderr: %2").arg(stageLabel, probeResult.stderrOutput));
+    }
 
     if (probeResult.success) {
         emit log(QString("%1 runtime probe passed.").arg(stageLabel));
         return true;
     }
 
-    const QString combinedOutput = probeResult.stderrOutput + "\n" + probeResult.stdoutOutput;
-    const bool looksHealthy = combinedOutput.contains("Usage", Qt::CaseInsensitive)
-        || combinedOutput.contains("help", Qt::CaseInsensitive)
-        || combinedOutput.contains("version", Qt::CaseInsensitive);
-
-    if (looksHealthy) {
-        emit log(QString("%1 runtime probe produced non-zero exit but returned recognizable help output.")
-                 .arg(stageLabel));
-        return true;
+    for (const QString& failure : probeResult.failures) {
+        emit log(QString("%1 runtime probe failure: %2").arg(stageLabel, failure));
     }
-
-    emit log(QString("%1 runtime probe failed: %2").arg(
-        stageLabel,
-        probeResult.errorMessage.isEmpty() ? QString("unknown error") : probeResult.errorMessage));
 
     return !requiredForSuccess;
-}
-
-bool PackageToAppImagePipeline::probeAppRunSyntax(const QString& appRunPath) const {
-    QFile file(appRunPath);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        return false;
-    }
-
-    const QByteArray firstLine = file.readLine();
-    file.close();
-
-    if (!firstLine.startsWith("#!")) {
-        return true;
-    }
-
-    if (firstLine.contains("sh") || firstLine.contains("bash")) {
-        const ProcessResult syntaxResult = SubprocessWrapper::execute(
-            "/bin/sh",
-            {"-n", appRunPath},
-            {},
-            5000);
-        return syntaxResult.success;
-    }
-
-    return true;
 }
 
 QString PackageToAppImagePipeline::findPrimaryAppDirExecutable() const {

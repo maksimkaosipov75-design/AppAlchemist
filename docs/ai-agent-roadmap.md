@@ -20,14 +20,24 @@ Preserve the current "double-click package -> short wait -> usable app on Arch/C
 - `repair path` currently targets Electron, Java, Python, and Chrome-style packages.
 
 ## Immediate Next Steps
-1. Commit the current uncommitted runtime-probe changes after re-checking behavior on at least one known-good package.
-2. Move runtime probe policy into a separate helper/class instead of keeping it inside `PackageToAppImagePipeline`.
-3. Add profile-specific non-GUI smoke checks:
+1. Pending commit only: behavior has been re-checked on `packaging/arch/appalchemist-1.0.0.tar.gz`, but the runtime-probe changes are still not committed.
+2. Done: move runtime probe policy into a separate helper/class instead of keeping it inside `PackageToAppImagePipeline`.
+3. Done: add profile-specific non-GUI smoke checks:
    - Electron: launcher/resources/sandbox helper checks
    - Python: interpreter and script path checks
    - Java: bundled JRE / `java -jar` readiness checks
-4. Replace generic `--help` probing with profile-aware probe commands and stricter parsing of failure patterns.
-5. Add structured probe results instead of plain log strings.
+4. Done: replace generic `--help` probing with profile-aware probe commands and stricter parsing of failure patterns.
+5. Done: add structured probe results instead of plain log strings.
+
+## Current Status
+- Runtime probe policy now lives in `include/runtime_probe.h` and `src/runtime_probe.cpp`.
+- `PackageToAppImagePipeline` only coordinates and logs structured probe results.
+- Probe behavior is now profile-aware:
+  - Electron and Chrome-style packages use `--version` plus resource/sandbox checks
+  - Python packages verify interpreter and script resolution before probing
+  - Java packages verify JAR plus bundled/system Java readiness before probing
+- A local smoke test already succeeded for `packaging/arch/appalchemist-1.0.0.tar.gz`, producing `/tmp/appalchemist-roadmap-smoke/appalchemist-1.AppImage`.
+- The remaining immediate task is to commit the verified runtime-probe work.
 
 ## Mid-Term Steps
 1. Add persistent package-hash based conversion cache metadata, not only cached AppImage file lookup.

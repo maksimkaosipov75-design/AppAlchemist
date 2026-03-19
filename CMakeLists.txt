@@ -32,6 +32,7 @@ set(APPALCHEMIST_BACKEND_SOURCES
     src/repository_browser.cpp
     src/conversion_controller.cpp
     src/package_profile.cpp
+    src/runtime_probe.cpp
     src/utils.cpp
     src/cache_manager.cpp
 )
@@ -51,6 +52,7 @@ set(APPALCHEMIST_BACKEND_HEADERS
     include/repository_browser.h
     include/conversion_controller.h
     include/package_profile.h
+    include/runtime_probe.h
     include/utils.h
     include/cache_manager.h
 )
