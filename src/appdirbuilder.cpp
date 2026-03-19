@@ -3,13 +3,221 @@
 #include "compatibility_rules.h"
 #include "utils.h"
 #include <QDir>
+#include <QDirIterator>
 #include <QFileInfo>
 #include <QFile>
 #include <QTextStream>
 #include <QDebug>
 #include <QRegularExpression>
+#include <algorithm>
+#include <limits>
 
 AppDirBuilder::AppDirBuilder() {
+}
+
+namespace {
+
+QString normalizeDesktopCandidateName(QString value) {
+    value = value.toLower();
+    value.replace(QRegularExpression("\\.desktop$"), "");
+    value.replace(QRegularExpression("(-|_)(latest|current|stable|installer|linux|amd64|x86_64|all|appimage)$",
+                                     QRegularExpression::CaseInsensitiveOption), "");
+    return value;
+}
+
+int extractIconScore(const QString& iconPath) {
+    const QString lowerPath = iconPath.toLower();
+    if (lowerPath.contains("1x1") || lowerPath.contains("placeholder")) {
+        return -1000;
+    }
+
+    if (lowerPath.endsWith(".png")) {
+        QFile pngFile(iconPath);
+        if (pngFile.open(QIODevice::ReadOnly)) {
+            const QByteArray header = pngFile.read(24);
+            pngFile.close();
+            if (header.size() >= 24 && header.startsWith("\x89PNG\r\n\x1a\n")) {
+                auto readBigEndian32 = [](const char* data) -> int {
+                    return (static_cast<unsigned char>(data[0]) << 24) |
+                           (static_cast<unsigned char>(data[1]) << 16) |
+                           (static_cast<unsigned char>(data[2]) << 8) |
+                           static_cast<unsigned char>(data[3]);
+                };
+                const int width = readBigEndian32(header.constData() + 16);
+                const int height = readBigEndian32(header.constData() + 20);
+                if (width <= 1 || height <= 1) {
+                    return -1000;
+                }
+                return std::max(width, height);
+            }
+        }
+    }
+
+    if (lowerPath.endsWith(".svg")) {
+        QFile svgFile(iconPath);
+        if (svgFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            const QString svgContent = QString::fromUtf8(svgFile.read(512));
+            svgFile.close();
+            if (svgContent.contains("width=\"1\"", Qt::CaseInsensitive) ||
+                svgContent.contains("height=\"1\"", Qt::CaseInsensitive)) {
+                return -1000;
+            }
+        }
+    }
+
+    QRegularExpression tinyIconRegex("(^|[^0-9])(1)x(1)([^0-9]|$)");
+    if (tinyIconRegex.match(lowerPath).hasMatch()) {
+        return -1000;
+    }
+
+    QRegularExpression sizedPathRegex("(\\d+)x(\\d+)");
+    const QRegularExpressionMatch sizedPathMatch = sizedPathRegex.match(lowerPath);
+    if (sizedPathMatch.hasMatch()) {
+        const int width = sizedPathMatch.captured(1).toInt();
+        const int height = sizedPathMatch.captured(2).toInt();
+        if (width <= 1 || height <= 1) {
+            return -1000;
+        }
+        return std::max(width, height);
+    }
+
+    QRegularExpression suffixedSizeRegex("_(\\d+)\\.(png|svg|xpm|ico)$");
+    const QRegularExpressionMatch suffixedSizeMatch = suffixedSizeRegex.match(lowerPath);
+    if (suffixedSizeMatch.hasMatch()) {
+        return suffixedSizeMatch.captured(1).toInt();
+    }
+
+    if (lowerPath.endsWith(".svg")) {
+        return 512;
+    }
+
+    return 64;
+}
+
+struct DesktopEntryCandidate {
+    QString fileName;
+    QString absolutePath;
+    int score = 0;
+};
+
+DesktopEntryCandidate selectPreferredDesktopEntry(const QDir& applicationsDir, const QString& packageName) {
+    DesktopEntryCandidate bestCandidate;
+    const QStringList desktopFiles = applicationsDir.entryList({"*.desktop"}, QDir::Files);
+    const QString normalizedPackageName = normalizeDesktopCandidateName(packageName);
+
+    for (const QString& desktopFile : desktopFiles) {
+        const QString absolutePath = applicationsDir.absoluteFilePath(desktopFile);
+        QFile file(absolutePath);
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            continue;
+        }
+
+        const QString content = file.readAll();
+        const QString lowerFileName = desktopFile.toLower();
+        const QString normalizedBaseName = normalizeDesktopCandidateName(QFileInfo(desktopFile).baseName());
+
+        if (!content.contains("Type=Application", Qt::CaseInsensitive)) {
+            continue;
+        }
+
+        if (lowerFileName.contains("url-handler") || lowerFileName.contains("handler")) {
+            continue;
+        }
+
+        DesktopEntryCandidate candidate;
+        candidate.fileName = desktopFile;
+        candidate.absolutePath = absolutePath;
+
+        if (!normalizedPackageName.isEmpty()) {
+            if (normalizedBaseName == normalizedPackageName) {
+                candidate.score += 120;
+            } else if (normalizedBaseName.contains(normalizedPackageName) ||
+                       normalizedPackageName.contains(normalizedBaseName)) {
+                candidate.score += 75;
+            }
+        }
+
+        if (!content.contains("NoDisplay=true", Qt::CaseInsensitive)) {
+            candidate.score += 40;
+        } else {
+            candidate.score -= 120;
+        }
+
+        if (!content.contains("MimeType=", Qt::CaseInsensitive)) {
+            candidate.score += 10;
+        } else if (content.contains("x-scheme-handler/", Qt::CaseInsensitive)) {
+            candidate.score -= 20;
+        }
+
+        if (content.contains("StartupWMClass=", Qt::CaseInsensitive)) {
+            candidate.score += 15;
+        }
+
+        if (content.contains("Icon=", Qt::CaseInsensitive)) {
+            candidate.score += 10;
+        }
+
+        if (bestCandidate.absolutePath.isEmpty() || candidate.score > bestCandidate.score) {
+            bestCandidate = candidate;
+        }
+    }
+
+    return bestCandidate;
+}
+
+QString selectBestIcon(const QStringList& candidates, const QStringList& preferredNames) {
+    QString bestPath;
+    int bestScore = std::numeric_limits<int>::min();
+
+    for (const QString& candidatePath : candidates) {
+        const QFileInfo info(candidatePath);
+        if (!info.exists() || !info.isFile()) {
+            continue;
+        }
+
+        int score = extractIconScore(candidatePath);
+        if (score < 0) {
+            continue;
+        }
+
+        const QString lowerFileName = info.fileName().toLower();
+        for (int index = 0; index < preferredNames.size(); ++index) {
+            const QString preferred = preferredNames.at(index).toLower();
+            if (preferred.isEmpty()) {
+                continue;
+            }
+
+            if (lowerFileName == QString("%1.%2").arg(preferred, info.suffix().toLower())) {
+                score += 200 - (index * 10);
+            } else if (lowerFileName.contains(preferred)) {
+                score += 120 - (index * 10);
+            }
+        }
+
+        if (bestPath.isEmpty() || score > bestScore) {
+            bestPath = candidatePath;
+            bestScore = score;
+        }
+    }
+
+    return bestPath;
+}
+
+QStringList collectMatchingFilesRecursively(const QString& rootPath, const QStringList& nameFilters) {
+    QStringList matches;
+    QDir rootDir(rootPath);
+    if (!rootDir.exists()) {
+        return matches;
+    }
+
+    QDirIterator it(rootPath, nameFilters, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        matches.append(it.next());
+    }
+
+    return matches;
+}
+
 }
 
 bool AppDirBuilder::createDirectoryStructure(const QString& appDirPath) {
@@ -180,18 +388,22 @@ bool AppDirBuilder::buildAppDir(const QString& appDirPath,
         qDebug() << "Found .desktop files in package:" << desktopFiles;
         
         if (!desktopFiles.isEmpty()) {
-            QString sourceDesktop = desktopSourceDir.absoluteFilePath(desktopFiles.first());
+            const DesktopEntryCandidate preferredDesktop = selectPreferredDesktopEntry(desktopSourceDir, metadata.package);
+            const QString selectedDesktopFile = preferredDesktop.fileName.isEmpty() ? desktopFiles.first() : preferredDesktop.fileName;
+            QString sourceDesktop = preferredDesktop.absolutePath.isEmpty()
+                ? desktopSourceDir.absoluteFilePath(selectedDesktopFile)
+                : preferredDesktop.absolutePath;
             QString targetDesktopDir = QString("%1/usr/share/applications").arg(appDirPath);
             QDir targetDesktopDirObj(targetDesktopDir);
             if (!targetDesktopDirObj.exists()) {
                 targetDesktopDirObj.mkpath(".");
             }
-            QString targetDesktop = QString("%1/%2").arg(targetDesktopDir).arg(desktopFiles.first());
+            QString targetDesktop = QString("%1/%2").arg(targetDesktopDir).arg(selectedDesktopFile);
             
             qDebug() << "Copying .desktop from" << sourceDesktop << "to" << targetDesktop;
             
             if (SubprocessWrapper::copyFile(sourceDesktop, targetDesktop)) {
-                qDebug() << "Successfully copied .desktop file:" << desktopFiles.first();
+                qDebug() << "Successfully copied .desktop file:" << selectedDesktopFile;
                 
                 // Verify and fix .desktop file (ensure Categories= is present)
                 if (QFileInfo::exists(targetDesktop)) {
@@ -359,85 +571,26 @@ bool AppDirBuilder::buildAppDir(const QString& appDirPath,
         
         QStringList iconExtensions = {"png", "svg", "xpm", "ico"};
         bool iconFound = false;
+        QStringList preferredIconNames = {iconNameToUse, metadata.package};
+        QStringList iconCandidates;
         
         qDebug() << "Searching for icon with name:" << iconNameToUse;
-        
-        // First, try to find icon with exact name
+
         for (const QString& searchPath : iconSearchPaths) {
-            QDir searchDir(searchPath);
-            if (searchDir.exists()) {
-                qDebug() << "Searching in:" << searchPath;
-                for (const QString& ext : iconExtensions) {
-                    // Try exact name match first
-                    QString exactName = QString("%1.%2").arg(iconNameToUse).arg(ext);
-                    QString exactPath = searchDir.absoluteFilePath(exactName);
-                    if (QFileInfo::exists(exactPath)) {
-                        QFileInfo foundIconInfo(exactPath);
-                        QString iconExt = foundIconInfo.suffix();
-                        
-                        // Copy to AppDir root with correct name
-                        rootIconName = QString("%1.%2").arg(iconNameToUse).arg(iconExt);
-                        QString rootIconPath = QString("%1/%2").arg(appDirPath).arg(rootIconName);
-                        
-                        if (SubprocessWrapper::copyFile(exactPath, rootIconPath)) {
-                            qDebug() << "Found and copied icon (exact match):" << rootIconPath;
-                            iconFound = true;
-                            break;
-                        }
-                    }
-                    
-                    // Also try wildcard search
-                    QStringList iconFiles = searchDir.entryList({QString("*.%1").arg(ext)}, QDir::Files);
-                    for (const QString& iconFile : iconFiles) {
-                        // Check if filename contains icon name
-                        if (iconFile.contains(iconNameToUse, Qt::CaseInsensitive)) {
-                            QString foundIcon = searchDir.absoluteFilePath(iconFile);
-                            QFileInfo foundIconInfo(foundIcon);
-                            QString iconExt = foundIconInfo.suffix();
-                            
-                            // Copy to AppDir root with correct name
-                            rootIconName = QString("%1.%2").arg(iconNameToUse).arg(iconExt);
-                            QString rootIconPath = QString("%1/%2").arg(appDirPath).arg(rootIconName);
-                            
-                            if (SubprocessWrapper::copyFile(foundIcon, rootIconPath)) {
-                                qDebug() << "Found and copied icon (partial match):" << rootIconPath << "from" << foundIcon;
-                                iconFound = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (iconFound) break;
-                }
-                if (iconFound) break;
+            for (const QString& extension : iconExtensions) {
+                iconCandidates.append(collectMatchingFilesRecursively(searchPath, {QString("*.%1").arg(extension)}));
             }
         }
-        
-        // If still not found, try to find any icon file and use it
-        if (!iconFound) {
-            qDebug() << "Exact match not found, searching for any icon file";
-            for (const QString& searchPath : iconSearchPaths) {
-                QDir searchDir(searchPath);
-                if (searchDir.exists()) {
-                    for (const QString& ext : iconExtensions) {
-                        QStringList iconFiles = searchDir.entryList({QString("*.%1").arg(ext)}, QDir::Files);
-                        if (!iconFiles.isEmpty()) {
-                            QString foundIcon = searchDir.absoluteFilePath(iconFiles.first());
-                            QFileInfo foundIconInfo(foundIcon);
-                            QString iconExt = foundIconInfo.suffix();
-                            
-                            // Copy to AppDir root with correct name
-                            rootIconName = QString("%1.%2").arg(iconNameToUse).arg(iconExt);
-                            QString rootIconPath = QString("%1/%2").arg(appDirPath).arg(rootIconName);
-                            
-                            if (SubprocessWrapper::copyFile(foundIcon, rootIconPath)) {
-                                qDebug() << "Found and copied any available icon:" << rootIconPath << "from" << foundIcon;
-                                iconFound = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (iconFound) break;
-                }
+
+        const QString selectedIconPath = selectBestIcon(iconCandidates, preferredIconNames);
+        if (!selectedIconPath.isEmpty()) {
+            QFileInfo foundIconInfo(selectedIconPath);
+            const QString iconExt = foundIconInfo.suffix().isEmpty() ? "png" : foundIconInfo.suffix();
+            rootIconName = QString("%1.%2").arg(iconNameToUse).arg(iconExt);
+            QString rootIconPath = QString("%1/%2").arg(appDirPath).arg(rootIconName);
+            if (SubprocessWrapper::copyFile(selectedIconPath, rootIconPath)) {
+                qDebug() << "Found and copied best icon:" << rootIconPath << "from" << selectedIconPath;
+                iconFound = true;
             }
         }
         
@@ -1102,6 +1255,12 @@ bool AppDirBuilder::fixDesktopFile(const QString& desktopPath, const PackageMeta
         content.contains("[Desktop Entry]", Qt::CaseInsensitive)) {
         qDebug() << "Adding missing Type=Application to .desktop file";
         content.replace(QRegularExpression("(?i)(\\[Desktop Entry\\])"), "\\1\nType=Application");
+        modified = true;
+    }
+
+    QRegularExpression noDisplayRegex("(?im)^NoDisplay\\s*=\\s*true\\s*$");
+    if (content.contains(noDisplayRegex)) {
+        content.replace(noDisplayRegex, "NoDisplay=false");
         modified = true;
     }
     

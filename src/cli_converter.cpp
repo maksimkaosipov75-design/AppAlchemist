@@ -2,6 +2,7 @@
 #include <QCoreApplication>
 #include <QFileInfo>
 #include <QDir>
+#include <QDirIterator>
 #include <QProcess>
 #include <QStandardPaths>
 #include <QDateTime>
@@ -13,6 +14,7 @@
 #include <QTextStream>
 #include <QVector>
 #include <algorithm>
+#include <limits>
 
 namespace {
 
@@ -58,6 +60,120 @@ QString normalizeDesktopIdentifier(QString value) {
     value = value.toLower();
     value.replace(QRegularExpression("[^a-z0-9]"), "");
     return value;
+}
+
+int scoreIconAsset(const QString& iconPath) {
+    const QString lowerPath = iconPath.toLower();
+    if (lowerPath.contains("1x1") || lowerPath.contains("placeholder")) {
+        return -1000;
+    }
+
+    if (lowerPath.endsWith(".png")) {
+        QFile pngFile(iconPath);
+        if (pngFile.open(QIODevice::ReadOnly)) {
+            const QByteArray header = pngFile.read(24);
+            pngFile.close();
+            if (header.size() >= 24 && header.startsWith("\x89PNG\r\n\x1a\n")) {
+                auto readBigEndian32 = [](const char* data) -> int {
+                    return (static_cast<unsigned char>(data[0]) << 24) |
+                           (static_cast<unsigned char>(data[1]) << 16) |
+                           (static_cast<unsigned char>(data[2]) << 8) |
+                           static_cast<unsigned char>(data[3]);
+                };
+                const int width = readBigEndian32(header.constData() + 16);
+                const int height = readBigEndian32(header.constData() + 20);
+                if (width <= 1 || height <= 1) {
+                    return -1000;
+                }
+                return std::max(width, height);
+            }
+        }
+    }
+
+    if (lowerPath.endsWith(".svg")) {
+        QFile svgFile(iconPath);
+        if (svgFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            const QString svgContent = QString::fromUtf8(svgFile.read(512));
+            svgFile.close();
+            if (svgContent.contains("width=\"1\"", Qt::CaseInsensitive) ||
+                svgContent.contains("height=\"1\"", Qt::CaseInsensitive)) {
+                return -1000;
+            }
+        }
+    }
+
+    QRegularExpression tinyIconRegex("(^|[^0-9])(1)x(1)([^0-9]|$)");
+    if (tinyIconRegex.match(lowerPath).hasMatch()) {
+        return -1000;
+    }
+
+    QRegularExpression sizedPathRegex("(\\d+)x(\\d+)");
+    const QRegularExpressionMatch sizedPathMatch = sizedPathRegex.match(lowerPath);
+    if (sizedPathMatch.hasMatch()) {
+        const int width = sizedPathMatch.captured(1).toInt();
+        const int height = sizedPathMatch.captured(2).toInt();
+        if (width <= 1 || height <= 1) {
+            return -1000;
+        }
+        return std::max(width, height);
+    }
+
+    QRegularExpression suffixedSizeRegex("_(\\d+)\\.(png|svg|xpm|ico)$");
+    const QRegularExpressionMatch suffixedSizeMatch = suffixedSizeRegex.match(lowerPath);
+    if (suffixedSizeMatch.hasMatch()) {
+        return suffixedSizeMatch.captured(1).toInt();
+    }
+
+    if (lowerPath.endsWith(".svg")) {
+        return 512;
+    }
+
+    return 64;
+}
+
+QString selectBestIconAsset(const QStringList& candidatePaths, const QStringList& preferredNames) {
+    QString bestPath;
+    int bestScore = std::numeric_limits<int>::min();
+
+    for (const QString& candidatePath : candidatePaths) {
+        const QFileInfo info(candidatePath);
+        if (!info.exists() || !info.isFile()) {
+            continue;
+        }
+
+        int score = scoreIconAsset(candidatePath);
+        if (score < 0) {
+            continue;
+        }
+
+        const QString lowerFileName = info.fileName().toLower();
+        for (int index = 0; index < preferredNames.size(); ++index) {
+            const QString preferred = preferredNames.at(index).toLower();
+            if (preferred.isEmpty()) {
+                continue;
+            }
+
+            if (lowerFileName == QString("%1.%2").arg(preferred, info.suffix().toLower())) {
+                score += 200 - (index * 10);
+            } else if (lowerFileName.contains(preferred)) {
+                score += 120 - (index * 10);
+            }
+        }
+
+        if (bestPath.isEmpty() || score > bestScore) {
+            bestPath = candidatePath;
+            bestScore = score;
+        }
+    }
+
+    return bestPath;
+}
+
+bool copyFileReplacing(const QString& sourcePath, const QString& targetPath) {
+    if (QFile::exists(targetPath) && !QFile::remove(targetPath)) {
+        return false;
+    }
+    return QFile::copy(sourcePath, targetPath);
 }
 
 }
@@ -523,9 +639,13 @@ void CliConverter::createDesktopEntry(const QString& appImagePath) {
                     }
                     if (!content.contains("NoDisplay=true", Qt::CaseInsensitive)) {
                         candidate.score += 10;
+                    } else {
+                        candidate.score -= 120;
                     }
                     if (!content.contains("MimeType=", Qt::CaseInsensitive)) {
                         candidate.score += 5;
+                    } else if (content.contains("x-scheme-handler/", Qt::CaseInsensitive)) {
+                        candidate.score -= 15;
                     }
 
                     candidates.append(candidate);
@@ -676,6 +796,12 @@ void CliConverter::createDesktopEntry(const QString& appImagePath) {
         desktopContent.replace(tryExecRegex, QString("TryExec=%1").arg(appImagePath));
     } else {
         desktopContent += QString("TryExec=%1\n").arg(appImagePath);
+    }
+
+    QRegularExpression noDisplayRegex("^NoDisplay\\s*=\\s*true\\s*$", QRegularExpression::MultilineOption | QRegularExpression::CaseInsensitiveOption);
+    if (noDisplayRegex.match(desktopContent).hasMatch()) {
+        desktopContent.replace(noDisplayRegex, "NoDisplay=false");
+        logToFile("Normalized NoDisplay=true to NoDisplay=false for launcher visibility");
     }
     
     // Remove or fix Path line - it should not point to paths inside AppImage
@@ -847,57 +973,63 @@ QString CliConverter::extractAndInstallIcon(const QDir& squashfsRoot, const QStr
     QStringList iconExtensions = {"png", "svg", "xpm", "ico"};
     QStringList iconSizes = {"256x256", "128x128", "64x64", "48x48", "32x32", "16x16"};
     QString foundIconPath;
-    
-    // First try usr/share/icons/hicolor/*/apps/ with all possible icon names
+    QStringList iconCandidates;
+
     for (const QString& tryIconName : iconNamesToTry) {
         for (const QString& size : iconSizes) {
             for (const QString& ext : iconExtensions) {
-                QString iconPath = QString("%1/usr/share/icons/hicolor/%2/apps/%3.%4")
+                const QString iconPath = QString("%1/usr/share/icons/hicolor/%2/apps/%3.%4")
                     .arg(squashfsRoot.absolutePath()).arg(size).arg(tryIconName).arg(ext);
                 if (QFile::exists(iconPath)) {
-                    foundIconPath = iconPath;
-                    iconName = tryIconName; // Update iconName to the found one
-                    logToFile(QString("Found icon: %1").arg(iconPath));
-                    break;
+                    iconCandidates.append(iconPath);
                 }
             }
-            if (!foundIconPath.isEmpty()) break;
-        }
-        if (!foundIconPath.isEmpty()) break;
-    }
-    
-    // Try usr/share/pixmaps/ with all possible icon names
-    if (foundIconPath.isEmpty()) {
-        for (const QString& tryIconName : iconNamesToTry) {
-            for (const QString& ext : iconExtensions) {
-                QString iconPath = QString("%1/usr/share/pixmaps/%2.%3")
-                    .arg(squashfsRoot.absolutePath()).arg(tryIconName).arg(ext);
-                if (QFile::exists(iconPath)) {
-                    foundIconPath = iconPath;
-                    iconName = tryIconName; // Update iconName to the found one
-                    logToFile(QString("Found icon in pixmaps: %1").arg(iconPath));
-                    break;
-                }
-            }
-            if (!foundIconPath.isEmpty()) break;
         }
     }
-    
-    // Try root directory with all possible icon names
-    if (foundIconPath.isEmpty()) {
-        for (const QString& tryIconName : iconNamesToTry) {
-            for (const QString& ext : iconExtensions) {
-                QString iconPath = QString("%1/%2.%3")
-                    .arg(squashfsRoot.absolutePath()).arg(tryIconName).arg(ext);
-                if (QFile::exists(iconPath)) {
-                    foundIconPath = iconPath;
-                    iconName = tryIconName; // Update iconName to the found one
-                    logToFile(QString("Found icon in root: %1").arg(iconPath));
+
+    for (const QString& tryIconName : iconNamesToTry) {
+        for (const QString& ext : iconExtensions) {
+            const QString pixmapsPath = QString("%1/usr/share/pixmaps/%2.%3")
+                .arg(squashfsRoot.absolutePath()).arg(tryIconName).arg(ext);
+            if (QFile::exists(pixmapsPath)) {
+                iconCandidates.append(pixmapsPath);
+            }
+
+            const QString rootPath = QString("%1/%2.%3")
+                .arg(squashfsRoot.absolutePath()).arg(tryIconName).arg(ext);
+            if (QFile::exists(rootPath)) {
+                iconCandidates.append(rootPath);
+            }
+        }
+    }
+
+    for (const QString& ext : iconExtensions) {
+        QDirIterator it(squashfsRoot.absolutePath(),
+                        {QString("*.%1").arg(ext)},
+                        QDir::Files,
+                        QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            const QString candidatePath = it.next();
+            const QString lowerPath = candidatePath.toLower();
+            bool matchesPreferredName = false;
+            for (const QString& tryIconName : iconNamesToTry) {
+                if (!tryIconName.isEmpty() && lowerPath.contains(tryIconName.toLower())) {
+                    matchesPreferredName = true;
                     break;
                 }
             }
-            if (!foundIconPath.isEmpty()) break;
+
+            if (matchesPreferredName || lowerPath.contains("product_logo") || lowerPath.contains("/icons/")) {
+                iconCandidates.append(candidatePath);
+            }
         }
+    }
+
+    foundIconPath = selectBestIconAsset(iconCandidates, iconNamesToTry);
+    if (!foundIconPath.isEmpty()) {
+        const QFileInfo selectedInfo(foundIconPath);
+        iconName = selectedInfo.baseName();
+        logToFile(QString("Selected best icon: %1").arg(foundIconPath));
     }
     
     // Try .DirIcon (might be a symlink) - but only if it doesn't point to a template
@@ -941,7 +1073,7 @@ QString CliConverter::extractAndInstallIcon(const QDir& squashfsRoot, const QStr
             if (!potentialIconPath.isEmpty() && !potentialIconName.isEmpty()) {
                 QString iconNameLower = potentialIconName.toLower();
                 bool looksLikeTemplate = iconNameLower.contains(QRegularExpression("\\d+k|\\d+bit|texture|\\d+x\\d+|template|example|sample|canon|nikon|dslr"));
-                if (!looksLikeTemplate) {
+                if (!looksLikeTemplate && scoreIconAsset(potentialIconPath) > 1) {
                     foundIconPath = potentialIconPath;
                     iconName = potentialIconName;
                     logToFile(QString("Found .DirIcon: %1").arg(foundIconPath));
@@ -952,7 +1084,7 @@ QString CliConverter::extractAndInstallIcon(const QDir& squashfsRoot, const QStr
                 // If we can't determine name, check the path
                 QString pathLower = potentialIconPath.toLower();
                 bool looksLikeTemplate = pathLower.contains(QRegularExpression("\\d+k|\\d+bit|texture|\\d+x\\d+|template|example|sample|canon|nikon|dslr"));
-                if (!looksLikeTemplate) {
+                if (!looksLikeTemplate && scoreIconAsset(potentialIconPath) > 1) {
                     foundIconPath = potentialIconPath;
                     logToFile(QString("Found .DirIcon: %1").arg(foundIconPath));
                 } else {
@@ -1009,7 +1141,7 @@ QString CliConverter::extractAndInstallIcon(const QDir& squashfsRoot, const QStr
                 targetDirObj.mkpath(".");
             }
             QString targetPath = QString("%1/%2.%3").arg(targetDir).arg(iconName).arg(iconExt);
-            if (QFile::copy(foundIconPath, targetPath)) {
+            if (copyFileReplacing(foundIconPath, targetPath)) {
                 iconInstalled = true;
                 logToFile(QString("Installed icon: %1").arg(targetPath));
             }
@@ -1022,7 +1154,7 @@ QString CliConverter::extractAndInstallIcon(const QDir& squashfsRoot, const QStr
             targetDirObj.mkpath(".");
         }
         QString targetPath = QString("%1/%2.%3").arg(targetDir).arg(iconName).arg(iconExt);
-        if (QFile::copy(foundIconPath, targetPath)) {
+        if (copyFileReplacing(foundIconPath, targetPath)) {
             iconInstalled = true;
             logToFile(QString("Installed icon: %1").arg(targetPath));
             
@@ -1035,7 +1167,7 @@ QString CliConverter::extractAndInstallIcon(const QDir& squashfsRoot, const QStr
                         targetDirObjSize.mkpath(".");
                     }
                     QString targetPathSize = QString("%1/%2.%3").arg(targetDirSize).arg(iconName).arg(iconExt);
-                    QFile::copy(foundIconPath, targetPathSize);
+                    copyFileReplacing(foundIconPath, targetPathSize);
                 }
             }
         }
