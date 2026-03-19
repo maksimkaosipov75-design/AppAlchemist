@@ -1,195 +1,260 @@
 # AppAlchemist
 
-**Convert .deb and .rpm packages to AppImage format automatically**
+AppAlchemist converts Linux application packages into portable AppImage bundles.
 
-AppAlchemist is a powerful tool that automatically converts Debian (.deb) and RPM (.rpm) packages into portable AppImage format. It handles dependency resolution, library bundling, and creates ready-to-run AppImages that work across different Linux distributions.
+![AppAlchemist GTK UI](docs/images/appalchemist-ui-preview.svg)
 
-## Features
+It is built for the practical workflow:
 
-- **Automatic Conversion**: Convert .deb and .rpm packages to AppImage with a single command
-- **Dependency Resolution**: Automatically detects and bundles required libraries
-- **Double-Click Support**: Double-click on .deb or .rpm files to convert and launch
-- **Self-Contained**: Includes appimagetool - no external dependencies required
-- **Cross-Distribution**: Works on any Linux distribution that supports Qt6
+1. choose a package
+2. convert it
+3. run the resulting AppImage
 
-## Installation
+The current frontend uses GTK4/libadwaita, and the same backend is also available through the CLI for batch and scripted conversion.
 
-### AppImage (Recommended)
+## Why AppAlchemist
 
-1. Download the latest `appalchemist-x86_64.AppImage` from the [Releases](https://github.com/appalchemist/appalchemist/releases) page
-2. Make it executable:
-   ```bash
-   chmod +x appalchemist-x86_64.AppImage
-   ```
-3. Run it:
-   ```bash
-   ./appalchemist-x86_64.AppImage
-   ```
+Linux applications are still distributed in many incompatible formats. AppAlchemist exists to reduce that friction.
 
-### Debian/Ubuntu (.deb)
+Instead of manually unpacking packages, chasing libraries, fixing launchers, and rebuilding desktop files, the tool tries to produce a single portable AppImage from the package you already have.
+
+The goal is practical portability, not theoretical perfection:
+
+- keep the UI minimal and fast for normal users
+- keep the CLI useful for repeatable conversion workflows
+- make converted apps integrate cleanly with the desktop when possible
+
+## What It Supports
+
+- `.deb`
+- `.rpm`
+- archive-style packages such as `.tar.gz`, `.tar.xz`, `.zip` when they contain a usable Linux app layout
+- desktop integration for produced AppImages
+- automatic icon extraction and `.desktop` generation
+- dependency bundling and compatibility fixes for many common desktop apps
+
+## What It Does
+
+AppAlchemist extracts the source package, detects the main executable, resolves runtime requirements, builds an AppDir, and then packages the result as an AppImage.
+
+It includes logic for common application layouts, including:
+
+- native desktop apps
+- Electron/Chromium-style packages
+- Python applications
+- Java applications
+- apps installed under `/opt`
+
+## Current Focus
+
+The project is optimized around end-user productivity:
+
+- minimal GTK interface focused on `choose package -> convert`
+- secondary options kept out of the way
+- CLI support for direct conversion and automation
+
+## Install
+
+### AppImage
+
+Download the latest release from the GitHub Releases page:
+
+- [Releases](https://github.com/maksimkaosipov75-design/AppAlchemist/releases)
+
+Make it executable and run it:
 
 ```bash
-sudo dpkg -i appalchemist_1.0.0-1_amd64.deb
-sudo apt-get install -f  # Install dependencies if needed
+chmod +x appalchemist-1.5.0-x86_64.AppImage
+./appalchemist-1.5.0-x86_64.AppImage
 ```
 
-### Fedora/RHEL/CentOS (.rpm)
+If FUSE is unavailable, use the fallback launcher shipped in local builds:
 
 ```bash
-sudo rpm -i appalchemist-1.0.0-1.x86_64.rpm
+./releases/run-appalchemist.sh
 ```
 
 ### From Source
 
-#### Requirements
+Requirements:
 
-- CMake 3.15 or higher
-- Qt6 (Core, Widgets, Network)
-- C++20 compatible compiler
-- Development tools (make, g++)
+- CMake 3.15+
+- C++20 compiler
+- Qt6 development packages
+- GTK4 and libadwaita development packages
+- standard packaging utilities available on your distro
 
-#### Build Instructions
+Build:
 
 ```bash
-git clone https://github.com/appalchemist/appalchemist.git
-cd appalchemist
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
-sudo make install
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
 ```
+
+Run:
+
+```bash
+./build/appalchemist
+```
+
+## Release Notes
+
+Latest published GitHub release:
+
+- `v1.5.0`
+
+Current GitHub release page:
+
+- [AppAlchemist Releases](https://github.com/maksimkaosipov75-design/AppAlchemist/releases)
+
+Important note:
+
+- the repository release tag is currently `v1.5.0`
+- the local packaging script still names the generated AppImage as `1.1.0`
+- this naming mismatch is a packaging/versioning cleanup item, not a missing binary
 
 ## Usage
 
-### GUI Mode
+### GTK UI
 
-Simply run the application:
-
-```bash
-appalchemist
-```
-
-Or double-click the AppImage file.
-
-### CLI Mode (Automatic Conversion)
-
-Convert a package and automatically launch the resulting AppImage:
+Launch the app:
 
 ```bash
-appalchemist --convert package.deb
-appalchemist --convert package.rpm
+./build/appalchemist
 ```
 
-Specify output directory:
+Main workflow:
+
+1. drag and drop a package, or click `Choose Packages`
+2. review output folder and optional advanced settings
+3. click `Convert Package`
+
+### CLI
+
+Convert one package:
 
 ```bash
-appalchemist --convert package.deb --output ~/AppImages
+./build/appalchemist --convert path/to/package.deb --no-launch
 ```
 
-Convert without auto-launching:
+Examples:
 
 ```bash
-appalchemist --convert package.deb --no-launch
+./build/appalchemist --convert path/to/package.rpm
+./build/appalchemist --convert path/to/archive.tar.gz --no-launch
+./build/appalchemist --convert path/to/archive.zip --output ~/AppImages
 ```
 
-### Double-Click Conversion
+Batch conversion:
 
-After installation, you can double-click on .deb or .rpm files to automatically convert them to AppImage format. The converted AppImage will be saved to `~/AppImages/` and launched automatically.
+```bash
+./build/appalchemist --batch file1.deb file2.rpm file3.tar.gz --no-launch
+```
+
+## Output
+
+By default, converted AppImages are written to a user output directory such as `~/AppImages`.
+
+AppAlchemist also creates desktop integration entries for produced AppImages, including:
+
+- launcher `.desktop` files in `~/.local/share/applications`
+- icons in `~/.local/share/icons/hicolor`
+
+## Tested Conversion Cases
+
+Recent work in the project specifically improved launcher and icon handling for real-world desktop apps, including:
+
+- Chrome-style packages that ship both visible and hidden `.desktop` entries
+- `/opt`-based applications such as `v2rayN`
+- archive-based app layouts covered by the regression corpus
+
+The seeded regression manifest currently lives in:
+
+- [docs/regression-corpus.md](docs/regression-corpus.md)
+- [docs/regression-corpus.json](docs/regression-corpus.json)
+
+## Packaging
+
+Build a distributable AppImage:
+
+```bash
+bash packaging/build-appimage.sh
+```
+
+Expected output:
+
+- `releases/appalchemist-1.1.0-x86_64.AppImage` from the current packaging script
+
+GitHub releases may publish the same binary under a newer release tag name such as `v1.5.0`.
+
+Other packaging scripts:
+
+```bash
+bash packaging/build-appimage-arm64.sh
+bash packaging/build-deb.sh
+bash packaging/build-rpm.sh
+```
+
+See also:
+
+- [packaging/README.md](packaging/README.md)
+- [packaging/BUILD_ALL.md](packaging/BUILD_ALL.md)
 
 ## How It Works
 
-1. **Package Extraction**: Extracts the package contents
-2. **Metadata Analysis**: Identifies executables, icons, and desktop files
-3. **Dependency Detection**: Analyzes required libraries
-4. **Library Bundling**: Copies necessary libraries into the AppDir
-5. **AppDir Creation**: Builds the AppImage directory structure
-6. **AppImage Building**: Uses appimagetool to create the final AppImage
+At a high level, AppAlchemist performs these stages:
 
-## AppImageTool Integration
+1. extract the source package
+2. classify the application layout
+3. detect the main executable and runtime profile
+4. apply compatibility fixes when needed
+5. build an AppDir with bundled dependencies
+6. generate a final AppImage
 
-AppAlchemist includes appimagetool internally. If appimagetool is not found in the system, AppAlchemist will:
+## Project Layout
 
-1. First check for a bundled copy in `usr/lib/appalchemist/appimagetool`
-2. Check common system locations (`/usr/bin/appimagetool`, etc.)
-3. Automatically download appimagetool from GitHub if needed
-4. Cache it for future use
+- [src](src): conversion backend
+- [include](include): headers and shared interfaces
+- [frontend/gtk](frontend/gtk): GTK4/libadwaita frontend
+- [packaging](packaging): release scripts
+- [docs](docs): roadmap and project notes
 
-No manual installation of appimagetool is required!
+## Limitations
 
-## Supported Package Types
+AppAlchemist improves portability, but conversion is not magic. Some packages still need manual review, especially:
 
-- **.deb** (Debian/Ubuntu packages)
-- **.rpm** (Fedora/RHEL/CentOS packages)
+- applications with unusual runtime launchers
+- packages that depend on system daemons or kernel features
+- packages with missing or broken upstream desktop metadata
+- apps that intentionally rely on distro-specific integration
 
-## Requirements
-
-- Linux (x86_64)
-- Qt6 runtime libraries (included in AppImage)
-- Standard Linux utilities (tar, ar, rpm2cpio, etc.)
-
-## Building Packages
-
-### Build AppImage
-
-```bash
-cd packaging
-./build-appimage.sh
-```
-
-Output: `releases/appalchemist-x86_64.AppImage`
-
-### Build .deb Package
-
-```bash
-cd packaging
-./build-deb.sh
-```
-
-Output: `build/appalchemist_1.0.0-1_amd64.deb`
-
-### Build .rpm Package
-
-```bash
-cd packaging
-./build-rpm.sh
-```
-
-Output: `build/rpmbuild/RPMS/x86_64/appalchemist-1.0.0-1.x86_64.rpm`
+For that reason, each conversion should be treated as a build artifact that may still need smoke-testing.
 
 ## Troubleshooting
 
-### AppImage Not Launching
+### App does not start after conversion
 
-- Ensure the AppImage has executable permissions: `chmod +x appalchemist-x86_64.AppImage`
-- Check that your system supports AppImage format
+- inspect the activity log in the UI
+- run conversion from the CLI to get clearer output
+- test the generated AppImage directly from a terminal
 
-### Conversion Fails
+### App does not appear in the application menu
 
-- Verify the package file is not corrupted
-- Check that you have sufficient disk space
-- Ensure required system utilities are installed (tar, ar, rpm2cpio)
+- verify the generated launcher in `~/.local/share/applications`
+- check whether your desktop environment needs a refresh of its app cache
 
-### AppImageTool Not Found
+### Wrong icon is shown
 
-AppAlchemist will automatically download appimagetool if not found. If download fails:
+- remove stale launchers and reconvert
+- verify the package actually contains a usable application icon
+- check whether an old launcher in `~/.local/share/applications` is shadowing the new one
 
-1. Check your internet connection
-2. Manually download from [AppImageKit Releases](https://github.com/AppImage/AppImageKit/releases)
-3. Place it in `thirdparty/appimagetool` in the project directory
+### Conversion fails
+
+- confirm the input package is valid
+- confirm you have enough disk space
+- retry with `--no-launch` so the conversion step is isolated from runtime launch issues
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## Support
-
-For issues, questions, or feature requests, please open an issue on [GitHub](https://github.com/appalchemist/appalchemist/issues).
-
-## Acknowledgments
-
-- [AppImageKit](https://github.com/AppImage/AppImageKit) for the AppImage format
-- Qt Project for the Qt framework
+MIT. See [LICENSE](LICENSE).
