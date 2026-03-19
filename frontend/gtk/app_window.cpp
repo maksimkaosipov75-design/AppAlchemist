@@ -2,6 +2,8 @@
 #include <QCoreApplication>
 #include <QEventLoop>
 #include <QMetaObject>
+#include <QProcess>
+#include <QStandardPaths>
 #include <gio/gio.h>
 #include <glib.h>
 #include <algorithm>
@@ -56,6 +58,22 @@ QStringList toQStringList(const std::vector<std::string>& values) {
 std::string defaultOutputDir() {
     return (std::filesystem::path(g_get_home_dir()) / "AppImages").string();
 }
+
+bool launchFolderFallback(const std::string& path) {
+    const QString qPath = QString::fromUtf8(path.c_str());
+
+    const QString gio = QStandardPaths::findExecutable("gio");
+    if (!gio.isEmpty() && QProcess::startDetached(gio, {"open", qPath})) {
+        return true;
+    }
+
+    const QString xdgOpen = QStandardPaths::findExecutable("xdg-open");
+    if (!xdgOpen.isEmpty() && QProcess::startDetached(xdgOpen, {qPath})) {
+        return true;
+    }
+
+    return false;
+}
 } // namespace
 
 AppWindow::AppWindow(AdwApplication* app)
@@ -100,8 +118,12 @@ AppWindow::AppWindow(AdwApplication* app)
     loadCss();
     updateFileSummary();
     updateOutputSummary();
-    refreshSearchResults();
-    updateSearchState("Search your repositories when you want to reuse an already packaged system build.");
+    if (m_searchResultsBox) {
+        refreshSearchResults();
+    }
+    if (m_searchStatusLabel) {
+        updateSearchState("Search your repositories when you want to reuse an already packaged system build.");
+    }
     appendLog("GTK frontend ready.");
     appendLog("Choose a package or search repositories to begin.");
     updateActions();
@@ -176,8 +198,8 @@ void AppWindow::buildUi() {
     auto* headerBar = adw_header_bar_new();
     auto* titleWidget = adw_window_title_new("AppAlchemist", "Fast package conversion");
     adw_header_bar_set_title_widget(ADW_HEADER_BAR(headerBar), titleWidget);
-    m_auxiliaryToggleButton = gtk_button_new_with_label("Tools");
-    gtk_widget_set_tooltip_text(m_auxiliaryToggleButton, "Toggle repository search and advanced options");
+    m_auxiliaryToggleButton = gtk_button_new_with_label("Advanced");
+    gtk_widget_set_tooltip_text(m_auxiliaryToggleButton, "Toggle advanced conversion options");
     gtk_widget_add_css_class(m_auxiliaryToggleButton, "flat");
     adw_header_bar_pack_end(ADW_HEADER_BAR(headerBar), m_auxiliaryToggleButton);
     auto* headerLogButton = gtk_button_new_from_icon_name("sidebar-show-right-symbolic");
@@ -202,75 +224,43 @@ void AppWindow::buildUi() {
     gtk_widget_set_margin_end(root, 18);
     adw_clamp_set_child(ADW_CLAMP(clamp), root);
 
-    auto* introBlock = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    gtk_widget_add_css_class(introBlock, "intro-block");
-    auto* eyebrow = gtk_label_new("Package workflow");
-    gtk_widget_add_css_class(eyebrow, "eyebrow");
-    gtk_label_set_xalign(GTK_LABEL(eyebrow), 0.0f);
-    auto* pageTitle = gtk_label_new("Convert packages with less interface overhead");
-    gtk_widget_add_css_class(pageTitle, "page-title");
-    gtk_label_set_xalign(GTK_LABEL(pageTitle), 0.0f);
-    auto* pageSubtitle = gtk_label_new(
-        "Choose an input package, review only the settings that matter, then convert. Repository search and logs stay available without crowding the main path."
-    );
-    gtk_widget_add_css_class(pageSubtitle, "page-subtitle");
-    gtk_label_set_xalign(GTK_LABEL(pageSubtitle), 0.0f);
-    gtk_label_set_wrap(GTK_LABEL(pageSubtitle), true);
-    gtk_box_append(GTK_BOX(introBlock), eyebrow);
-    gtk_box_append(GTK_BOX(introBlock), pageTitle);
-    gtk_box_append(GTK_BOX(introBlock), pageSubtitle);
-    gtk_box_append(GTK_BOX(root), introBlock);
-
     m_dropCard = gtk_box_new(GTK_ORIENTATION_VERTICAL, 14);
     gtk_widget_add_css_class(m_dropCard, "surface-card");
     gtk_widget_add_css_class(m_dropCard, "source-card");
     auto* dropIcon = gtk_image_new_from_icon_name("package-x-generic-symbolic");
     gtk_widget_set_size_request(dropIcon, 40, 40);
     gtk_widget_add_css_class(dropIcon, "hero-icon");
-    auto* dropTitle = gtk_label_new("Source packages");
-    gtk_widget_add_css_class(dropTitle, "hero-title");
-    gtk_label_set_xalign(GTK_LABEL(dropTitle), 0.0f);
-    auto* dropSubtitle = gtk_label_new("Drag a local package here or choose it from disk. The default path is intentionally simple: select, review output folder, convert.");
-    gtk_widget_add_css_class(dropSubtitle, "hero-subtitle");
-    gtk_label_set_xalign(GTK_LABEL(dropSubtitle), 0.0f);
-    gtk_label_set_wrap(GTK_LABEL(dropSubtitle), true);
     m_fileSummaryLabel = gtk_label_new("");
     gtk_widget_add_css_class(m_fileSummaryLabel, "summary-value");
     gtk_label_set_xalign(GTK_LABEL(m_fileSummaryLabel), 0.0f);
     gtk_label_set_wrap(GTK_LABEL(m_fileSummaryLabel), true);
-    auto* formatHint = gtk_label_new("Supported: .deb, .rpm, .tar.*, .zip");
-    gtk_widget_add_css_class(formatHint, "dim-label");
-    gtk_label_set_xalign(GTK_LABEL(formatHint), 0.0f);
     auto* heroActions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     m_heroActionsBox = heroActions;
     gtk_widget_add_css_class(heroActions, "action-row");
     m_selectFilesButton = gtk_button_new_with_label("Choose Packages");
     gtk_widget_add_css_class(m_selectFilesButton, "suggested-action");
-    m_searchButton = gtk_button_new_with_label("Search Repository");
     auto* clearButton = gtk_button_new_with_label("Clear Selection");
     gtk_widget_add_css_class(clearButton, "flat-button");
     gtk_box_append(GTK_BOX(heroActions), m_selectFilesButton);
-    gtk_box_append(GTK_BOX(heroActions), m_searchButton);
     gtk_box_append(GTK_BOX(heroActions), clearButton);
     gtk_box_append(GTK_BOX(m_dropCard), dropIcon);
-    gtk_box_append(GTK_BOX(m_dropCard), dropTitle);
-    gtk_box_append(GTK_BOX(m_dropCard), dropSubtitle);
     gtk_box_append(GTK_BOX(m_dropCard), m_fileSummaryLabel);
-    gtk_box_append(GTK_BOX(m_dropCard), formatHint);
     gtk_box_append(GTK_BOX(m_dropCard), heroActions);
+
+    m_convertButton = gtk_button_new_with_label("Convert Package");
+    gtk_widget_add_css_class(m_convertButton, "suggested-action");
+    gtk_widget_add_css_class(m_convertButton, "primary-build-button");
+    gtk_box_append(GTK_BOX(m_dropCard), m_convertButton);
     gtk_box_append(GTK_BOX(root), m_dropCard);
 
     auto* target = gtk_drop_target_new(GDK_TYPE_FILE_LIST, GDK_ACTION_COPY);
     g_signal_connect(target, "drop", G_CALLBACK(AppWindow::onDropFiles), this);
     gtk_widget_add_controller(m_dropCard, GTK_EVENT_CONTROLLER(target));
 
-    auto* statusCard = gtk_box_new(GTK_ORIENTATION_VERTICAL, 14);
+    auto* statusCard = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
     gtk_widget_add_css_class(statusCard, "surface-card");
     gtk_widget_add_css_class(statusCard, "session-card");
-    auto* statusHeader = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
-    auto* statusEyebrow = gtk_label_new("Session");
-    gtk_widget_add_css_class(statusEyebrow, "eyebrow");
-    gtk_label_set_xalign(GTK_LABEL(statusEyebrow), 0.0f);
+    auto* statusHeader = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     m_statusLabel = gtk_label_new("Ready");
     gtk_label_set_xalign(GTK_LABEL(m_statusLabel), 0.0f);
     gtk_widget_add_css_class(m_statusLabel, "status-label");
@@ -278,9 +268,8 @@ void AppWindow::buildUi() {
     gtk_label_set_xalign(GTK_LABEL(m_statusDetailLabel), 0.0f);
     gtk_label_set_wrap(GTK_LABEL(m_statusDetailLabel), true);
     gtk_widget_add_css_class(m_statusDetailLabel, "status-detail");
-    gtk_box_append(GTK_BOX(statusHeader), statusEyebrow);
+    gtk_widget_set_hexpand(m_statusLabel, true);
     gtk_box_append(GTK_BOX(statusHeader), m_statusLabel);
-    gtk_box_append(GTK_BOX(statusHeader), m_statusDetailLabel);
 
     m_progressBar = gtk_progress_bar_new();
     gtk_widget_add_css_class(m_progressBar, "status-meter");
@@ -289,16 +278,14 @@ void AppWindow::buildUi() {
     auto* actionRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     m_primaryActionsBox = actionRow;
     gtk_widget_add_css_class(actionRow, "action-row");
-    m_convertButton = gtk_button_new_with_label("Convert");
-    gtk_widget_add_css_class(m_convertButton, "suggested-action");
     m_openOutputButton = gtk_button_new_with_label("Open Folder");
     gtk_widget_add_css_class(m_openOutputButton, "flat-button");
-    gtk_box_append(GTK_BOX(actionRow), m_convertButton);
     gtk_box_append(GTK_BOX(actionRow), m_openOutputButton);
+    gtk_box_append(GTK_BOX(statusHeader), actionRow);
 
     gtk_box_append(GTK_BOX(statusCard), statusHeader);
+    gtk_box_append(GTK_BOX(statusCard), m_statusDetailLabel);
     gtk_box_append(GTK_BOX(statusCard), m_progressBar);
-    gtk_box_append(GTK_BOX(statusCard), actionRow);
     gtk_box_append(GTK_BOX(root), statusCard);
 
     auto* settingsCard = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
@@ -355,47 +342,9 @@ void AppWindow::buildUi() {
     gtk_box_append(GTK_BOX(settingsCard), settingsSubtitle);
     gtk_box_append(GTK_BOX(settingsCard), settingsGroup);
 
-    auto* repositoryCard = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_widget_add_css_class(repositoryCard, "surface-card");
-    gtk_widget_add_css_class(repositoryCard, "repo-card");
-    auto* repositoryTitle = gtk_label_new("Repository");
-    gtk_label_set_xalign(GTK_LABEL(repositoryTitle), 0.0f);
-    gtk_widget_add_css_class(repositoryTitle, "section-title");
-    auto* repositorySubtitle = gtk_label_new("Use this only when the package is not already local.");
-    gtk_label_set_xalign(GTK_LABEL(repositorySubtitle), 0.0f);
-    gtk_label_set_wrap(GTK_LABEL(repositorySubtitle), true);
-    gtk_widget_add_css_class(repositorySubtitle, "panel-subtitle");
-    auto* repositorySearchRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-    m_repositorySearchRow = repositorySearchRow;
-    gtk_widget_add_css_class(repositorySearchRow, "search-row");
-    m_searchEntry = gtk_entry_new();
-    gtk_entry_set_placeholder_text(GTK_ENTRY(m_searchEntry), "Search package name");
-    gtk_widget_set_hexpand(m_searchEntry, true);
-    auto* repositorySearchButton = gtk_button_new_with_label("Search");
-    gtk_widget_add_css_class(repositorySearchButton, "flat-button");
-    auto* repositoryScroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(repositoryScroll), 176);
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(repositoryScroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    gtk_widget_add_css_class(repositoryScroll, "card-scroll");
-    m_searchResultsBox = gtk_list_box_new();
-    gtk_widget_add_css_class(m_searchResultsBox, "results-list");
-    gtk_list_box_set_selection_mode(GTK_LIST_BOX(m_searchResultsBox), GTK_SELECTION_NONE);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(repositoryScroll), m_searchResultsBox);
-    m_searchStatusLabel = gtk_label_new("");
-    gtk_label_set_xalign(GTK_LABEL(m_searchStatusLabel), 0.0f);
-    gtk_widget_add_css_class(m_searchStatusLabel, "dim-label");
-    gtk_box_append(GTK_BOX(repositorySearchRow), m_searchEntry);
-    gtk_box_append(GTK_BOX(repositorySearchRow), repositorySearchButton);
-    gtk_box_append(GTK_BOX(repositoryCard), repositoryTitle);
-    gtk_box_append(GTK_BOX(repositoryCard), repositorySubtitle);
-    gtk_box_append(GTK_BOX(repositoryCard), repositorySearchRow);
-    gtk_box_append(GTK_BOX(repositoryCard), m_searchStatusLabel);
-    gtk_box_append(GTK_BOX(repositoryCard), repositoryScroll);
-
     auto* auxiliaryBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 18);
     gtk_widget_add_css_class(auxiliaryBox, "secondary-tools");
     gtk_box_append(GTK_BOX(auxiliaryBox), settingsCard);
-    gtk_box_append(GTK_BOX(auxiliaryBox), repositoryCard);
 
     m_auxiliaryRevealer = gtk_revealer_new();
     gtk_revealer_set_transition_type(GTK_REVEALER(m_auxiliaryRevealer), GTK_REVEALER_TRANSITION_TYPE_SWING_DOWN);
@@ -451,7 +400,6 @@ void AppWindow::buildUi() {
     g_value_set_enum(&vertical, GTK_ORIENTATION_VERTICAL);
     adw_breakpoint_add_setter(compactActions, G_OBJECT(m_heroActionsBox), "orientation", &vertical);
     adw_breakpoint_add_setter(compactActions, G_OBJECT(m_primaryActionsBox), "orientation", &vertical);
-    adw_breakpoint_add_setter(compactActions, G_OBJECT(m_repositorySearchRow), "orientation", &vertical);
     g_value_unset(&vertical);
     adw_application_window_add_breakpoint(ADW_APPLICATION_WINDOW(m_window), compactActions);
 
@@ -461,14 +409,9 @@ void AppWindow::buildUi() {
     g_signal_connect(m_selectOutputButton, "clicked", G_CALLBACK(AppWindow::onSelectOutputClicked), this);
     g_signal_connect(m_convertButton, "clicked", G_CALLBACK(AppWindow::onConvertClicked), this);
     g_signal_connect(m_openOutputButton, "clicked", G_CALLBACK(AppWindow::onOpenOutputClicked), this);
-    g_signal_connect(m_searchButton, "clicked", G_CALLBACK(AppWindow::onSearchRepositoryClicked), this);
-    g_signal_connect(repositorySearchButton, "clicked", G_CALLBACK(AppWindow::onSearchRepositoryClicked), this);
     g_signal_connect(m_logToggleButton, "clicked", G_CALLBACK(AppWindow::onToggleLogClicked), this);
     g_signal_connect(m_auxiliaryToggleButton, "clicked", G_CALLBACK(AppWindow::onToggleAuxiliaryClicked), this);
     g_signal_connect(headerLogButton, "clicked", G_CALLBACK(AppWindow::onToggleLogClicked), this);
-    g_signal_connect_swapped(m_searchEntry, "activate", G_CALLBACK(+[](AppWindow* self) {
-        self->startRepositorySearch();
-    }), this);
     g_signal_connect_swapped(clearButton, "clicked", G_CALLBACK(+[](AppWindow* self) {
         self->m_packagePaths.clear();
         self->updateFileSummary();
@@ -491,11 +434,11 @@ void AppWindow::loadCss() {
 void AppWindow::updateFileSummary() {
     std::string summary;
     if (m_packagePaths.empty()) {
-        summary = "No package selected yet";
+        summary = "No package selected";
     } else if (m_packagePaths.size() == 1) {
-        summary = "Selected: " + std::filesystem::path(m_packagePaths.front()).filename().string();
+        summary = std::filesystem::path(m_packagePaths.front()).filename().string();
     } else {
-        summary = std::to_string(m_packagePaths.size()) + " packages selected for the next build";
+        summary = std::to_string(m_packagePaths.size()) + " packages selected";
     }
 
     gtk_label_set_text(GTK_LABEL(m_fileSummaryLabel), summary.c_str());
@@ -516,9 +459,13 @@ void AppWindow::updateActions() {
     gtk_widget_set_sensitive(m_optimizeSwitch, !running);
     gtk_widget_set_sensitive(m_dependencySwitch, !running);
     gtk_widget_set_sensitive(m_compressionDropdown, !running);
-    gtk_widget_set_sensitive(m_searchEntry, !running && !repoBusy);
-    gtk_widget_set_sensitive(m_searchButton, !running && !repoBusy);
-    gtk_button_set_label(GTK_BUTTON(m_convertButton), running ? "Cancel" : "Convert");
+    if (m_searchEntry) {
+        gtk_widget_set_sensitive(m_searchEntry, !running && !repoBusy);
+    }
+    if (m_searchButton) {
+        gtk_widget_set_sensitive(m_searchButton, !running && !repoBusy);
+    }
+    gtk_button_set_label(GTK_BUTTON(m_convertButton), running ? "Cancel" : "Convert Package");
     gtk_widget_set_sensitive(m_convertButton, running || hasPackages);
 
     std::string detail;
@@ -527,9 +474,9 @@ void AppWindow::updateActions() {
     } else if (repoBusy) {
         detail = "Repository activity is in progress. Your conversion settings stay available while search or download finishes.";
     } else if (hasPackages) {
-        detail = "Source selection is ready. Review settings on the right, then start conversion.";
+        detail = "Source selection is ready. Convert now, or open Advanced only if you need to change packaging behavior.";
     } else {
-        detail = "Choose local packages first, or search repositories if you want to stage an input package.";
+        detail = "Choose a local package, then start conversion.";
     }
 
     gtk_label_set_text(GTK_LABEL(m_statusDetailLabel), detail.c_str());
@@ -570,10 +517,17 @@ void AppWindow::setProgress(double fraction) {
 }
 
 void AppWindow::updateSearchState(const std::string& message) {
+    if (!m_searchStatusLabel) {
+        return;
+    }
     gtk_label_set_text(GTK_LABEL(m_searchStatusLabel), message.c_str());
 }
 
 void AppWindow::refreshSearchResults() {
+    if (!m_searchResultsBox) {
+        return;
+    }
+
     GtkWidget* child = gtk_widget_get_first_child(m_searchResultsBox);
     while (child) {
         GtkWidget* next = gtk_widget_get_next_sibling(child);
@@ -881,10 +835,60 @@ void AppWindow::requestCancel() {
 }
 
 void AppWindow::openOutputFolder() {
-    const auto uri = std::string("file://") + m_outputDir;
-    auto* launcher = gtk_uri_launcher_new(uri.c_str());
-    gtk_uri_launcher_launch(launcher, GTK_WINDOW(m_window), nullptr, nullptr, nullptr);
+    try {
+        std::filesystem::create_directories(m_outputDir);
+    } catch (const std::exception& ex) {
+        const std::string error = "Failed to prepare output folder: " + std::string(ex.what());
+        setStatus("Could not open output folder.");
+        appendLog("ERROR: " + error);
+        return;
+    }
+
+    GError* error = nullptr;
+    char* uri = g_filename_to_uri(m_outputDir.c_str(), nullptr, &error);
+    if (!uri) {
+        const std::string message = error ? error->message : "Unknown URI conversion error";
+        setStatus("Could not open output folder.");
+        appendLog("ERROR: Failed to build output folder URI: " + message);
+        if (error) {
+            g_error_free(error);
+        }
+        return;
+    }
+
+    auto* launcher = gtk_uri_launcher_new(uri);
+    gtk_uri_launcher_launch(
+        launcher,
+        GTK_WINDOW(m_window),
+        nullptr,
+        +[](GObject* sourceObject, GAsyncResult* result, gpointer userData) {
+            auto* self = static_cast<AppWindow*>(userData);
+            GError* launchError = nullptr;
+            const gboolean ok = gtk_uri_launcher_launch_finish(GTK_URI_LAUNCHER(sourceObject), result, &launchError);
+            if (ok) {
+                self->appendLog("Opened output folder: " + self->m_outputDir);
+                return;
+            }
+
+            if (launchFolderFallback(self->m_outputDir)) {
+                self->appendLog("Opened output folder via fallback: " + self->m_outputDir);
+                if (launchError) {
+                    g_error_free(launchError);
+                }
+                return;
+            }
+
+            const std::string message = launchError ? launchError->message : "Unknown launch error";
+            self->setStatus("Could not open output folder.");
+            self->appendLog("ERROR: Failed to open output folder: " + message);
+            if (launchError) {
+                g_error_free(launchError);
+            }
+        },
+        this
+    );
     g_object_unref(launcher);
+    g_free(uri);
 }
 
 void AppWindow::chooseFiles() {

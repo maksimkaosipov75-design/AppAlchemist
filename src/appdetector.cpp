@@ -63,10 +63,12 @@ AppInfo AppDetector::detectApp(const QString& appDirPath,
                 info.workingDir = "${HERE}/usr/games";
             } else if (relativeExecPath.contains("/usr/bin/")) {
                 info.workingDir = "${HERE}/usr/bin";
-            } else if (relativeExecPath.contains("/opt/")) {
+            } else if (relativeExecPath.contains("/opt/") || relativeExecPath.startsWith("opt/")) {
                 QString path = relativeExecPath;
                 if (path.startsWith("/")) {
                     path = path.section("/opt/", 1);
+                } else if (path.startsWith("opt/")) {
+                    path = path.section("opt/", 1);
                 }
                 path = path.section('/', 0, 0);
                 info.workingDir = QString("${HERE}/opt/%1").arg(path);
@@ -109,9 +111,14 @@ AppInfo AppDetector::detectApp(const QString& appDirPath,
                 QString path = relativeExecPath.section("/usr/share/", 1);
                 path = path.section('/', 0, -2); // Remove filename
                 info.workingDir = QString("${HERE}/usr/share/%1").arg(path);
-            } else if (relativeExecPath.contains("/opt/")) {
+            } else if (relativeExecPath.contains("/opt/") || relativeExecPath.contains("opt/")) {
                 // Opt-based: opt/yandex-music
-                QString path = relativeExecPath.section("/opt/", 1);
+                QString path = relativeExecPath;
+                if (path.contains("/opt/")) {
+                    path = path.section("/opt/", 1);
+                } else {
+                    path = path.section("opt/", 1);
+                }
                 path = path.section('/', 0, 0); // Get first directory
                 info.workingDir = QString("${HERE}/opt/%1").arg(path);
             } else {
@@ -155,10 +162,12 @@ AppInfo AppDetector::detectApp(const QString& appDirPath,
         // Games should run from usr/games directory
         info.workingDir = "${HERE}/usr/games";
         qDebug() << "Detected game in usr/games, workingDir:" << info.workingDir;
-    } else if (relativeExecPath.contains("/opt/")) {
+    } else if (relativeExecPath.contains("/opt/") || relativeExecPath.startsWith("opt/")) {
         QString path = relativeExecPath;
         if (path.startsWith("/")) {
             path = path.section("/opt/", 1);
+        } else if (path.startsWith("opt/")) {
+            path = path.section("opt/", 1);
         }
         path = path.section('/', 0, 0); // Get first directory after opt/
         info.workingDir = QString("${HERE}/opt/%1").arg(path);

@@ -41,7 +41,7 @@ headerbar:backdrop {
 
 .page-title {
   color: @window_fg_color;
-  font-size: 1.82rem;
+  font-size: 1.62rem;
   font-weight: 760;
   letter-spacing: -0.04em;
 }
@@ -57,7 +57,7 @@ headerbar:backdrop {
 
 .page-subtitle,
 .hero-subtitle {
-  font-size: 0.98rem;
+  font-size: 0.95rem;
 }
 
 .surface-card {
@@ -78,11 +78,12 @@ headerbar:backdrop {
       alpha(@card_bg_color, 0.98),
       alpha(@card_bg_color, 0.92));
   border-color: alpha(@accent_bg_color, 0.18);
-  padding: 20px;
+  padding: 22px;
 }
 
 .hero-icon {
   color: @accent_bg_color;
+  margin-bottom: 2px;
 }
 
 .hero-title {
@@ -93,13 +94,24 @@ headerbar:backdrop {
 }
 
 .session-card {
-  padding-top: 16px;
-  padding-bottom: 16px;
+  padding-top: 14px;
+  padding-bottom: 14px;
+  background: linear-gradient(180deg, alpha(@card_bg_color, 0.92), alpha(@card_bg_color, 0.84));
+  box-shadow: none;
 }
 
 .summary-value {
   color: @window_fg_color;
-  font-weight: 650;
+  font-size: 1.02rem;
+  font-weight: 690;
+}
+
+.primary-build-button {
+  min-height: 52px;
+  margin-top: 2px;
+  border-radius: 14px;
+  font-size: 1.02rem;
+  font-weight: 750;
 }
 
 .action-row,
@@ -172,7 +184,11 @@ dropdown > button:focus {
 }
 
 .status-label {
-  font-size: 1.15rem;
+  font-size: 1rem;
+}
+
+.status-detail {
+  font-size: 0.94rem;
 }
 
 .settings-card .section-title,
@@ -182,13 +198,13 @@ dropdown > button:focus {
 }
 
 .status-meter trough {
-  min-height: 8px;
+  min-height: 6px;
   border-radius: 999px;
   background: alpha(@window_fg_color, 0.08);
 }
 
 .status-meter progress {
-  min-height: 8px;
+  min-height: 6px;
   border-radius: 999px;
   background: linear-gradient(90deg, alpha(@accent_bg_color, 0.72), @accent_bg_color);
 }
@@ -206,6 +222,7 @@ dropdown > button:focus {
 
 .secondary-tools {
   margin-top: -2px;
+  opacity: 0.98;
 }
 
 .results-list {

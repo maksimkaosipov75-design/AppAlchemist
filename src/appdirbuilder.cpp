@@ -1636,6 +1636,11 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
                         workingDir = QString("\"%1\"").arg(workingDir);
                     }
                     out << "cd " << workingDir << "\n";
+                } else if (relativePath.startsWith("opt/")) {
+                    const QString nativeWorkingDir = QFileInfo(relativePath).path();
+                    if (!nativeWorkingDir.isEmpty() && nativeWorkingDir != ".") {
+                        out << "cd \"${HERE}/" << nativeWorkingDir << "\"\n";
+                    }
                 }
                 // Use absolute path from HERE for reliability
                 out << "exec \"${HERE}/" << relativePath << "\" \"$@\"\n";
@@ -1845,6 +1850,11 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
                         workingDir = QString("\"%1\"").arg(workingDir);
                     }
                     out << "cd " << workingDir << "\n";
+                } else if (relativePath.startsWith("opt/")) {
+                    const QString nativeWorkingDir = QFileInfo(relativePath).path();
+                    if (!nativeWorkingDir.isEmpty() && nativeWorkingDir != ".") {
+                        out << "cd \"${HERE}/" << nativeWorkingDir << "\"\n";
+                    }
                 }
                 out << "exec \"${HERE}/" << relativePath << "\" \"$@\"\n";
             }
