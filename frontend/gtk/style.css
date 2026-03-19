@@ -1,30 +1,47 @@
+@define-color app_accent @accent_bg_color;
+@define-color app_accent_fg @accent_fg_color;
+@define-color app_border alpha(@window_fg_color, 0.08);
+@define-color app_soft_bg alpha(@window_fg_color, 0.035);
+@define-color app_card mix(@card_bg_color, @window_bg_color, 0.30);
+
 .window-shell {
-  border-radius: 32px;
+  border-radius: 24px;
 }
 
 window,
 .background {
   background:
     radial-gradient(circle at top,
-      alpha(#caa36a, 0.11) 0%,
-      alpha(#caa36a, 0.03) 22%,
-      alpha(#161311, 0.00) 48%),
-    linear-gradient(180deg, #1a1715 0%, #14110f 100%);
-  color: #efe2c4;
+      alpha(@accent_bg_color, 0.10) 0%,
+      alpha(@accent_bg_color, 0.035) 24%,
+      alpha(@window_bg_color, 0.0) 48%),
+    linear-gradient(180deg,
+      mix(@window_bg_color, @view_bg_color, 0.55) 0%,
+      @window_bg_color 100%);
+  color: @window_fg_color;
 }
 
 headerbar {
-  background: alpha(#171310, 0.92);
-  border-bottom: 1px solid alpha(#ead7ab, 0.08);
+  background: alpha(@headerbar_bg_color, 0.82);
+  border-bottom: 1px solid alpha(@headerbar_fg_color, 0.06);
   box-shadow: none;
 }
 
 headerbar:backdrop {
-  background: alpha(#14110f, 0.88);
+  background: alpha(@headerbar_bg_color, 0.90);
+}
+
+.content-columns {
+  margin-top: 4px;
+}
+
+.workspace-column,
+.sidebar-column {
+  min-width: 0;
 }
 
 .eyebrow {
-  color: alpha(#f0ddb0, 0.62);
+  color: alpha(@accent_bg_color, 0.95);
   font-size: 0.78rem;
   font-weight: 700;
   letter-spacing: 0.12em;
@@ -32,8 +49,8 @@ headerbar:backdrop {
 }
 
 .page-title {
-  color: #f6e5bf;
-  font-size: 2.15rem;
+  color: @window_fg_color;
+  font-size: 1.82rem;
   font-weight: 760;
   letter-spacing: -0.04em;
 }
@@ -44,116 +61,136 @@ headerbar:backdrop {
 .support-copy,
 .status-detail,
 .dim-label {
-  color: alpha(#f1e3c3, 0.67);
+  color: alpha(@window_fg_color, 0.62);
 }
 
 .page-subtitle,
 .hero-subtitle {
-  font-size: 1rem;
+  font-size: 0.98rem;
 }
 
-.panel-card {
-  background:
-    linear-gradient(180deg,
-      alpha(#fff6df, 0.04),
-      alpha(#0b0908, 0.12));
-  border: 1px solid alpha(#f1ddb1, 0.08);
-  border-radius: 26px;
-  padding: 22px;
-  box-shadow: 0 16px 36px alpha(#000000, 0.16);
+.surface-card {
+  background: linear-gradient(180deg, alpha(@card_bg_color, 0.96), alpha(@card_bg_color, 0.88));
+  border: 1px solid @app_border;
+  border-radius: 20px;
+  padding: 18px;
+  box-shadow: 0 12px 28px alpha(#000000, 0.06);
 }
 
-.drop-card {
+.workflow-card {
+  padding-top: 14px;
+  padding-bottom: 14px;
+  background: alpha(@window_fg_color, 0.025);
+  box-shadow: none;
+}
+
+.workflow-steps {
+  margin-top: 2px;
+}
+
+.workflow-step {
+  padding: 7px 12px;
+  border-radius: 999px;
+  background: alpha(@accent_bg_color, 0.08);
+  border: 1px solid alpha(@accent_bg_color, 0.14);
+  color: alpha(@window_fg_color, 0.82);
+  font-weight: 600;
+}
+
+.source-card {
   background:
     radial-gradient(circle at top left,
-      alpha(#d6aa66, 0.18),
-      alpha(#d6aa66, 0.04) 34%,
-      alpha(#120f0d, 0.00) 52%),
+      alpha(@accent_bg_color, 0.16),
+      alpha(@accent_bg_color, 0.04) 30%,
+      alpha(@card_bg_color, 0.0) 54%),
     linear-gradient(180deg,
-      alpha(#fff5db, 0.05),
-      alpha(#0a0908, 0.12));
-  border: 1px solid alpha(#d7ad70, 0.22);
-  padding: 30px;
+      alpha(@card_bg_color, 0.98),
+      alpha(@card_bg_color, 0.92));
+  border-color: alpha(@accent_bg_color, 0.18);
+  padding: 20px;
 }
 
 .hero-icon {
-  color: alpha(#dfb570, 0.98);
+  color: @accent_bg_color;
 }
 
 .hero-title {
-  color: #f7e7c3;
-  font-size: 1.5rem;
+  color: @window_fg_color;
+  font-size: 1.18rem;
   font-weight: 730;
-  letter-spacing: -0.025em;
+  letter-spacing: -0.02em;
 }
 
-.hero-meta {
-  color: #e2b56f;
+.summary-value {
+  color: @window_fg_color;
   font-weight: 650;
 }
 
-.hero-actions,
+.action-row,
 .search-row {
-  margin-top: 6px;
+  margin-top: 4px;
 }
 
-.hero-actions button,
+.search-row {
+  margin-top: 2px;
+}
+
+.action-row button,
 .search-row button {
-  min-height: 42px;
+  min-height: 40px;
   padding-left: 16px;
   padding-right: 16px;
 }
 
 button {
-  border-radius: 999px;
+  border-radius: 12px;
   box-shadow: none;
 }
 
 button:not(.suggested-action):not(.destructive-action) {
-  background: alpha(#f8e9c6, 0.045);
-  border: 1px solid alpha(#f4dfb2, 0.09);
-  color: #f2e3c0;
+  background: @app_soft_bg;
+  border: 1px solid @app_border;
+  color: @window_fg_color;
 }
 
 button:not(.suggested-action):not(.destructive-action):hover {
-  background: alpha(#f8e9c6, 0.08);
+  background: alpha(@window_fg_color, 0.06);
 }
 
 button.suggested-action {
-  background: linear-gradient(180deg, #d6af74 0%, #c29655 100%);
-  border: 1px solid alpha(#f8e4bc, 0.16);
-  color: #221810;
+  background: linear-gradient(180deg, alpha(@accent_bg_color, 0.92), @accent_bg_color);
+  border: 1px solid alpha(@accent_bg_color, 0.46);
+  color: @accent_fg_color;
 }
 
 button.suggested-action:hover {
-  background: linear-gradient(180deg, #ddb87f 0%, #cda060 100%);
+  background: linear-gradient(180deg, alpha(@accent_bg_color, 0.98), alpha(@accent_bg_color, 0.94));
 }
 
-.pill-button {
-  border-radius: 999px;
+.flat-button {
+  background: alpha(@accent_bg_color, 0.08);
+  border-color: alpha(@accent_bg_color, 0.12);
 }
 
 entry,
-.search-entry,
 dropdown > button {
   min-height: 44px;
-  border-radius: 999px;
-  background: alpha(#fff2d6, 0.04);
-  border: 1px solid alpha(#f2ddb0, 0.08);
-  color: #f1e2bf;
+  border-radius: 14px;
+  background: alpha(@card_bg_color, 0.82);
+  border: 1px solid @app_border;
+  color: @window_fg_color;
   box-shadow: none;
 }
 
 entry:focus,
-.search-entry:focus,
 dropdown > button:focus {
-  border-color: alpha(#deb06f, 0.50);
-  box-shadow: 0 0 0 3px alpha(#d8aa6a, 0.10);
+  border-color: alpha(@accent_bg_color, 0.44);
+  box-shadow: 0 0 0 3px alpha(@accent_bg_color, 0.12);
 }
 
 .section-title,
 .status-label {
-  color: #f5e4be;
+  color: @window_fg_color;
   font-weight: 690;
   letter-spacing: -0.01em;
 }
@@ -162,23 +199,34 @@ dropdown > button:focus {
   font-size: 1.15rem;
 }
 
+.settings-card .section-title,
+.repo-card .section-title,
+.log-card .section-title,
+.workflow-card .section-title {
+  font-size: 1rem;
+}
+
 .status-meter trough {
-  min-height: 10px;
+  min-height: 8px;
   border-radius: 999px;
-  background: alpha(#fff0d0, 0.08);
+  background: alpha(@window_fg_color, 0.08);
 }
 
 .status-meter progress {
-  min-height: 10px;
+  min-height: 8px;
   border-radius: 999px;
-  background: linear-gradient(90deg, #c89652 0%, #e1b979 100%);
+  background: linear-gradient(90deg, alpha(@accent_bg_color, 0.72), @accent_bg_color);
 }
 
-.results-scroll,
-.log-scroll {
-  background: alpha(#080706, 0.08);
-  border: 1px solid alpha(#f0dab0, 0.06);
-  border-radius: 20px;
+.card-scroll {
+  background: alpha(@window_fg_color, 0.02);
+  border: 1px solid @app_border;
+  border-radius: 16px;
+}
+
+.repo-card,
+.log-card {
+  background: linear-gradient(180deg, alpha(@card_bg_color, 0.9), alpha(@card_bg_color, 0.82));
 }
 
 .results-list {
@@ -186,11 +234,15 @@ dropdown > button:focus {
 }
 
 .result-row {
-  border-radius: 18px;
+  border-radius: 14px;
 }
 
 .result-row:hover {
-  background: alpha(#f6e7c4, 0.04);
+  background: alpha(@accent_bg_color, 0.06);
+}
+
+.result-row button {
+  min-width: 96px;
 }
 
 .embedded-preferences {
@@ -198,14 +250,14 @@ dropdown > button:focus {
 }
 
 .embedded-preferences row {
-  min-height: 72px;
-  border-radius: 18px;
-  background: alpha(#f8e8c5, 0.03);
-  border: 1px solid alpha(#f1ddb1, 0.05);
+  min-height: 68px;
+  border-radius: 14px;
+  background: alpha(@window_fg_color, 0.025);
+  border: 1px solid alpha(@window_fg_color, 0.05);
 }
 
 .embedded-preferences row:hover {
-  background: alpha(#f8e8c5, 0.05);
+  background: alpha(@window_fg_color, 0.04);
 }
 
 switch {
@@ -213,26 +265,26 @@ switch {
   min-height: 32px;
   padding: 2px;
   border-radius: 999px;
-  background: alpha(#fff2d6, 0.08);
-  border: 1px solid alpha(#f0d9ac, 0.10);
+  background: alpha(@window_fg_color, 0.08);
+  border: 1px solid alpha(@window_fg_color, 0.10);
   box-shadow: none;
 }
 
 switch:checked {
-  background: alpha(#d2a15d, 0.92);
-  border-color: alpha(#f0d9ac, 0.22);
+  background: @accent_bg_color;
+  border-color: alpha(@accent_bg_color, 0.42);
 }
 
 switch slider {
   min-width: 26px;
   min-height: 26px;
   border-radius: 999px;
-  background: #fff6e3;
-  box-shadow: 0 2px 8px alpha(#000000, 0.22);
+  background: @window_bg_color;
+  box-shadow: 0 2px 8px alpha(#000000, 0.14);
 }
 
 switch:checked slider {
-  background: #1e1610;
+  background: @accent_fg_color;
 }
 
 .secret-dialog-box {
@@ -242,9 +294,13 @@ switch:checked slider {
 .activity-view,
 textview {
   background: transparent;
-  color: #ecdebf;
+  color: @window_fg_color;
 }
 
 textview text {
   background: transparent;
+}
+
+textview {
+  padding: 6px;
 }

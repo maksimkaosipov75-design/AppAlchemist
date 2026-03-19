@@ -26,6 +26,7 @@ private:
     void setProgress(double fraction);
     void updateSearchState(const std::string& message);
     void refreshSearchResults();
+    void toggleLogVisibility();
     void startConversion();
     void requestCancel();
     void openOutputFolder();
@@ -44,6 +45,7 @@ private:
     static void onOpenOutputClicked(GtkButton* button, gpointer userData);
     static void onSearchRepositoryClicked(GtkButton* button, gpointer userData);
     static void onRepositoryDownloadClicked(GtkButton* button, gpointer userData);
+    static void onToggleLogClicked(GtkButton* button, gpointer userData);
     static gboolean onDropFiles(GtkDropTarget* target, const GValue* value, double x, double y, gpointer userData);
     static void onFilesDialogFinished(GObject* sourceObject, GAsyncResult* result, gpointer userData);
     static void onOutputDialogFinished(GObject* sourceObject, GAsyncResult* result, gpointer userData);
@@ -68,6 +70,8 @@ private:
     GtkWidget* m_searchButton;
     GtkWidget* m_searchStatusLabel;
     GtkWidget* m_searchResultsBox;
+    GtkWidget* m_logToggleButton;
+    GtkWidget* m_logRevealer;
     GtkWidget* m_optimizeSwitch;
     GtkWidget* m_dependencySwitch;
     GtkWidget* m_compressionDropdown;
@@ -82,6 +86,7 @@ private:
     bool m_isSearching;
     bool m_isDownloading;
     bool m_hasSearchRequest;
+    bool m_logVisible;
 };
 
 #endif // APPALCHEMIST_GTK_APP_WINDOW_H
