@@ -39,6 +39,7 @@ Preserve the current "double-click package -> short wait -> usable app on Arch/C
 - A local smoke test already succeeded for `packaging/arch/appalchemist-1.0.0.tar.gz`, producing `/tmp/appalchemist-roadmap-smoke/appalchemist-1.AppImage`.
 - Conversion cache metadata is now written and read via `CacheManager` using package-hash keyed JSON records, with legacy file/mtime lookup kept as a fallback path.
 - Tarballs are now classified into explicit subtypes in `PackageProfile`, improving planning and logging for portable bundles, installer archives, source archives, and self-contained app bundles.
+- Initial rules-driven compatibility fixes now load from `assets/compatibility_rules.json` via a dedicated compatibility rule engine instead of being fully hardcoded in AppRun generation.
 
 ## Mid-Term Steps
 1. Implemented in code: add persistent package-hash based conversion cache metadata, not only cached AppImage file lookup.
@@ -47,7 +48,7 @@ Preserve the current "double-click package -> short wait -> usable app on Arch/C
    - installer tarball
    - source tarball
    - self-contained app bundle
-3. Introduce rules-driven compatibility fixes from a data file, not hardcoded branches.
+3. Implemented initial version in code: introduce rules-driven compatibility fixes from a data file, not hardcoded branches.
 4. Separate package extraction, classification, repair, validation, and packaging into distinct components.
 5. Build a regression corpus of real packages and store expected outcomes.
 

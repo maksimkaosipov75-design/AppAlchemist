@@ -32,6 +32,7 @@ set(APPALCHEMIST_BACKEND_SOURCES
     src/repository_browser.cpp
     src/conversion_controller.cpp
     src/package_profile.cpp
+    src/compatibility_rules.cpp
     src/runtime_probe.cpp
     src/utils.cpp
     src/cache_manager.cpp
@@ -52,6 +53,7 @@ set(APPALCHEMIST_BACKEND_HEADERS
     include/repository_browser.h
     include/conversion_controller.h
     include/package_profile.h
+    include/compatibility_rules.h
     include/runtime_probe.h
     include/utils.h
     include/cache_manager.h
@@ -68,6 +70,11 @@ target_link_libraries(appalchemist_backend
         Qt6::Network
         Qt6::Xml
         Qt6::Sql
+)
+
+target_compile_definitions(appalchemist_backend
+    PRIVATE
+        APPALCHEMIST_COMPATIBILITY_RULES_PATH="${CMAKE_CURRENT_SOURCE_DIR}/assets/compatibility_rules.json"
 )
 
 if(PkgConfig_FOUND)

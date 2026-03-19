@@ -1,0 +1,27 @@
+{
+  "rules": [
+    {
+      "id": "electron-shared-dir-env",
+      "application_profile": "electron",
+      "base_dir_regex": "^usr/share/",
+      "exports": {
+        "VSCODE_PATH": "${HERE}/{baseDir}"
+      },
+      "unset": [
+        "ELECTRON_RUN_AS_NODE"
+      ]
+    },
+    {
+      "id": "chrome-sandbox-setup",
+      "application_profile": "chrome",
+      "exports": {
+        "CHROME_DEVEL_SANDBOX": "${HERE}/opt/google/chrome/chrome-sandbox"
+      },
+      "prelaunch": [
+        "if [ -f \"${CHROME_DEVEL_SANDBOX}\" ]; then",
+        "    chmod 4755 \"${CHROME_DEVEL_SANDBOX}\" 2>/dev/null || true",
+        "fi"
+      ]
+    }
+  ]
+}

@@ -130,11 +130,6 @@ AppInfo AppDetector::detectApp(const QString& appDirPath,
             }
         }
         
-        // Set VSCODE_PATH or similar for Electron apps in usr/share
-        if (electronBaseDir.startsWith("usr/share/")) {
-            info.envVars << QString("VSCODE_PATH=\"${HERE}/%1\"").arg(electronBaseDir);
-        }
-        
         return info;
     }
     
@@ -580,4 +575,3 @@ QString AppDetector::findElectronBinary(const QString& fullBaseDirPath) {
     
     return QString();
 }
-

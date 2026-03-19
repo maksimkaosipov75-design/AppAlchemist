@@ -1,5 +1,6 @@
 #include "appdirbuilder.h"
 #include "appdetector.h"
+#include "compatibility_rules.h"
 #include "utils.h"
 #include <QDir>
 #include <QFileInfo>
@@ -1176,6 +1177,8 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
         appInfo.workingDir = "${HERE}/usr/bin";
     }
     
+    const CompatibilityFixes compatibilityFixes = CompatibilityRuleEngine::resolve(appInfo, metadata);
+
     // UNIVERSAL: Set up environment paths dynamically
     QStringList pathDirs = {"usr/bin", "usr/sbin", "usr/games"};
     QString arch = detectSystemArchitecture();
@@ -1232,14 +1235,20 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
     for (const QString& envVar : appInfo.envVars) {
         out << "export " << envVar << "\n";
     }
-    
-    // Chrome sandbox setup (if needed)
-    if (appInfo.needsSandbox) {
-        out << "# Chrome-specific environment variables\n";
-        out << "export CHROME_DEVEL_SANDBOX=\"${HERE}/opt/google/chrome/chrome-sandbox\"\n";
-        out << "if [ -f \"${CHROME_DEVEL_SANDBOX}\" ]; then\n";
-        out << "    chmod 4755 \"${CHROME_DEVEL_SANDBOX}\" 2>/dev/null || true\n";
-        out << "fi\n";
+
+    for (const QString& exportStatement : compatibilityFixes.exportStatements) {
+        out << exportStatement << "\n";
+    }
+
+    for (const QString& unsetVariable : compatibilityFixes.unsetVariables) {
+        out << "unset " << unsetVariable << "\n";
+    }
+
+    for (const QString& preLaunchCommand : compatibilityFixes.preLaunchCommands) {
+        out << preLaunchCommand << "\n";
+    }
+
+    if (!compatibilityFixes.isEmpty()) {
         out << "\n";
     }
     
@@ -1351,10 +1360,6 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
             } else if (appInfo.type == AppType::Electron) {
                 // Electron application
                 out << "# Electron application\n";
-                if (appInfo.needsElectronPath && !appInfo.baseDir.isEmpty()) {
-                    out << "export VSCODE_PATH=\"${HERE}/" << appInfo.baseDir << "\"\n";
-                    out << "unset ELECTRON_RUN_AS_NODE\n";
-                }
                 
                 // For VS Code/Codium style apps, check if there's a bin/ subdirectory with the launcher
                 QFileInfo mainExecInfo(metadata.mainExecutable);
@@ -1696,10 +1701,6 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
                 out << "exec \"${HERE}/" << relativePath << "\" \"$@\"\n";
             } else if (fallbackAppInfo.type == AppType::Electron) {
                 out << "# Electron application\n";
-                if (fallbackAppInfo.needsElectronPath && !fallbackAppInfo.baseDir.isEmpty()) {
-                    out << "export VSCODE_PATH=\"${HERE}/" << fallbackAppInfo.baseDir << "\"\n";
-                    out << "unset ELECTRON_RUN_AS_NODE\n";
-                }
                 // Determine working directory - replace ${HERE} with actual path
                 QString workingDir = fallbackAppInfo.workingDir;
                 if (workingDir.contains("${HERE}")) {
