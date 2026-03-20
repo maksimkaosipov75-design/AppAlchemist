@@ -6,6 +6,7 @@
 #include <QDirIterator>
 #include <QFileInfo>
 #include <QFile>
+#include <QSet>
 #include <QTextStream>
 #include <QDebug>
 #include <QRegularExpression>
@@ -16,6 +17,76 @@ AppDirBuilder::AppDirBuilder() {
 }
 
 namespace {
+
+const QSet<QString>& desktopEntryCategories() {
+    static const QSet<QString> categories = {
+        "AudioVideo", "Audio", "Video", "Development", "Education", "Game",
+        "Graphics", "Network", "Office", "Science", "Settings", "System",
+        "Utility", "Building", "Debugger", "IDE", "GUIDesigner", "Profiling",
+        "RevisionControl", "Translation", "Calendar", "ContactManagement",
+        "Database", "Dictionary", "Chart", "Email", "Finance", "FlowChart",
+        "PDA", "ProjectManagement", "Presentation", "Spreadsheet",
+        "WordProcessor", "2DGraphics", "VectorGraphics", "RasterGraphics",
+        "3DGraphics", "Scanning", "OCR", "Photography", "Publishing",
+        "Viewer", "TextTools", "DesktopSettings", "HardwareSettings",
+        "Printing", "PackageManager", "Dialup", "InstantMessaging", "Chat",
+        "IRCClient", "Feed", "FileTransfer", "HamRadio", "News", "P2P",
+        "RemoteAccess", "Telephony", "TelephonyTools", "VideoConference",
+        "WebBrowser", "WebDevelopment", "Midi", "Mixer", "Sequencer",
+        "Tuner", "TV", "AudioVideoEditing", "Player", "Recorder",
+        "DiscBurning", "ActionGame", "AdventureGame", "ArcadeGame",
+        "BoardGame", "BlocksGame", "CardGame", "KidsGame", "LogicGame",
+        "RolePlaying", "Shooter", "Simulation", "SportsGame", "StrategyGame",
+        "Art", "Construction", "Music", "Languages", "ArtificialIntelligence",
+        "Astronomy", "Biology", "Chemistry", "ComputerScience",
+        "DataVisualization", "Economy", "Electricity", "Geography", "Geology",
+        "Geoscience", "History", "Humanities", "ImageProcessing", "Literature",
+        "Maps", "Math", "NumericalAnalysis", "MedicalSoftware", "Physics",
+        "Robotics", "Spirituality", "Sports", "ParallelComputing",
+        "Amusement", "Archiving", "Compression", "Electronics",
+        "Emulator", "Engineering", "FileTools", "FileManager",
+        "TerminalEmulator", "Filesystem", "Monitor", "Security",
+        "Accessibility", "Calculator", "Clock", "TextEditor"
+    };
+    return categories;
+}
+
+QString sanitizeDesktopCategories(const QString& categoriesValue) {
+    QStringList sanitizedCategories;
+    const QStringList categories = categoriesValue.split(';', Qt::SkipEmptyParts);
+
+    for (QString category : categories) {
+        category = category.trimmed();
+        if (category.isEmpty()) {
+            continue;
+        }
+
+        if (category.startsWith("X-")) {
+            sanitizedCategories << category;
+            continue;
+        }
+
+        if (desktopEntryCategories().contains(category)) {
+            sanitizedCategories << category;
+            continue;
+        }
+
+        QString extensionCategory = category;
+        extensionCategory.remove(QRegularExpression("[^A-Za-z0-9-]"));
+        if (extensionCategory.isEmpty()) {
+            continue;
+        }
+
+        sanitizedCategories << QString("X-%1").arg(extensionCategory);
+    }
+
+    sanitizedCategories.removeDuplicates();
+    if (sanitizedCategories.isEmpty()) {
+        sanitizedCategories << "Utility";
+    }
+
+    return QString("Categories=%1;").arg(sanitizedCategories.join(';'));
+}
 
 QString normalizeDesktopCandidateName(QString value) {
     value = value.toLower();
@@ -1248,6 +1319,17 @@ bool AppDirBuilder::fixDesktopFile(const QString& desktopPath, const PackageMeta
             }
         }
         modified = true;
+    } else {
+        QRegularExpression categoriesRegex("(?im)^Categories\\s*=\\s*(.*)$");
+        QRegularExpressionMatch match = categoriesRegex.match(content);
+        if (match.hasMatch()) {
+            const QString sanitizedCategories = sanitizeDesktopCategories(match.captured(1).trimmed());
+            if (match.captured(0).trimmed() != sanitizedCategories) {
+                qDebug() << "Sanitized Categories= in .desktop file to:" << sanitizedCategories;
+                content.replace(categoriesRegex, sanitizedCategories);
+                modified = true;
+            }
+        }
     }
     
     // Also ensure Type=Application is present

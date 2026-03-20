@@ -426,10 +426,9 @@ ProbeCommand buildProbeCommand(const QString& appDirPath,
     case ApplicationProfile::SelfContainedTarball:
     case ApplicationProfile::Unknown:
     case ApplicationProfile::Service:
-        command.program = appRunPath;
-        command.arguments = {"--version"};
-        command.timeoutMs = 3000;
-        command.successPatterns = {"version"};
+        // Generic desktop launchers often ignore CLI flags and open the UI instead,
+        // which makes the probe intrusive and produces false negatives on timeout.
+        command.program.clear();
         break;
     }
 
