@@ -1,0 +1,69 @@
+name: Conversion failure
+description: Report a package or archive that fails to convert
+title: "[Conversion]: "
+labels: ["conversion", "needs-triage"]
+body:
+  - type: input
+    id: appalchemist-version
+    attributes:
+      label: AppAlchemist version
+      placeholder: "1.5.0"
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Linux distribution
+      placeholder: "CachyOS, Arch, Ubuntu 24.04, Fedora 40"
+    validations:
+      required: true
+  - type: dropdown
+    id: input-format
+    attributes:
+      label: Input format
+      options:
+        - .deb
+        - .rpm
+        - .tar.gz
+        - .tar.xz
+        - .zip
+        - other archive
+    validations:
+      required: true
+  - type: input
+    id: package-name
+    attributes:
+      label: Package name and version
+      placeholder: "example-app 1.2.3"
+    validations:
+      required: true
+  - type: input
+    id: package-url
+    attributes:
+      label: Package URL
+      description: Include this only if the package is public.
+  - type: textarea
+    id: conversion-log
+    attributes:
+      label: Conversion log
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: appdir-structure
+    attributes:
+      label: Generated AppDir structure
+      description: Paste `find AppDir -maxdepth 3 -type f | sort` output if available.
+      render: text
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true

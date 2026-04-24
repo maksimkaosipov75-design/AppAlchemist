@@ -20,14 +20,114 @@ QString stripQuotes(QString value) {
     return value;
 }
 
-bool recreateSymlink(const QFileInfo& sourceInfo, const QString& destination) {
-    const QString target = sourceInfo.symLinkTarget();
-    if (target.isEmpty()) {
+QString readRawSymlinkTarget(const QString& path) {
+    // Use readlink to get the raw symlink target (not resolved)
+    // QFileInfo::symLinkTarget() resolves to absolute path which breaks AppImage portability
+    QProcess proc;
+    proc.setProgram("readlink");
+    proc.setArguments({path});
+    proc.start();
+    if (proc.waitForFinished(5000) && proc.exitCode() == 0) {
+        return QString::fromUtf8(proc.readAllStandardOutput()).trimmed();
+    }
+    return QString();
+}
+
+QString computeRelativeSymlinkTarget(const QString& symlinkPath, const QString& absoluteTarget,
+                                      const QString& extractedRoot, const QString& destRoot) {
+    // Convert an absolute symlink target to a relative path that works inside AppDir.
+    //
+    // Case 1: target is inside the extracted package tree (e.g. /tmp/appalchemist-XXX/data/usr/share/...)
+    //   → strip the extracted root and make relative to symlink location in destRoot
+    // Case 2: target is an absolute system path (e.g. /usr/share/codium/bin/codium)
+    //   → try to find the corresponding file in destRoot and make relative
+
+    QString normalizedTarget = absoluteTarget;
+    QString relativeSuffix;
+
+    // Try stripping extractedRoot/data/ prefix first, then extractedRoot/ prefix
+    if (!extractedRoot.isEmpty()) {
+        QString dataPrefix = extractedRoot + "/data/";
+        QString directPrefix = extractedRoot + "/";
+        if (normalizedTarget.startsWith(dataPrefix)) {
+            relativeSuffix = normalizedTarget.mid(dataPrefix.length());
+        } else if (normalizedTarget.startsWith(directPrefix)) {
+            relativeSuffix = normalizedTarget.mid(directPrefix.length());
+            // Still strip data/ if present
+            if (relativeSuffix.startsWith("data/")) relativeSuffix = relativeSuffix.mid(5);
+        }
+    }
+
+    // If not matched, try common absolute system paths
+    if (relativeSuffix.isEmpty()) {
+        if (normalizedTarget.startsWith("/usr/") || normalizedTarget.startsWith("/opt/") ||
+            normalizedTarget.startsWith("/bin/") || normalizedTarget.startsWith("/lib/") ||
+            normalizedTarget.startsWith("/sbin/")) {
+            relativeSuffix = normalizedTarget.mid(1);
+        }
+    }
+
+    if (relativeSuffix.isEmpty()) {
+        return QString();
+    }
+
+    // Now compute relative path from symlink location to target location within destRoot
+    QString destTargetPath = QString("%1/%2").arg(destRoot).arg(relativeSuffix);
+    QString symlinkDir = QFileInfo(symlinkPath).absolutePath();
+
+    QDir symlinkDirObj(symlinkDir);
+    QString relPath = symlinkDirObj.relativeFilePath(destTargetPath);
+    return relPath;
+}
+
+bool recreateSymlink(const QFileInfo& sourceInfo, const QString& destination,
+                     const QString& extractedRoot = QString(), const QString& destRoot = QString()) {
+    // First try to read the raw symlink target (preserving relative paths)
+    QString rawTarget = readRawSymlinkTarget(sourceInfo.absoluteFilePath());
+
+    if (!rawTarget.isEmpty() && !rawTarget.startsWith("/")) {
+        // Relative symlink — preserve as-is, it will work correctly in AppDir
+        // as long as the directory structure is maintained
+        QFile::remove(destination);
+        return QFile::link(rawTarget, destination);
+    }
+
+    // Absolute symlink — need to convert to relative path for portability
+    QString absoluteTarget = rawTarget.isEmpty() ? sourceInfo.symLinkTarget() : rawTarget;
+    if (absoluteTarget.isEmpty()) {
         return false;
     }
 
+    // Try to compute a relative path within the destination tree
+    if (!destRoot.isEmpty()) {
+        QString relTarget = computeRelativeSymlinkTarget(destination, absoluteTarget, extractedRoot, destRoot);
+        if (!relTarget.isEmpty()) {
+            QFile::remove(destination);
+            return QFile::link(relTarget, destination);
+        }
+    }
+
+    // Fallback: if target is a system path that maps into the AppDir, make it relative
+    QString fallbackTarget = absoluteTarget;
+    if (fallbackTarget.startsWith("/usr/") || fallbackTarget.startsWith("/opt/")) {
+        // Strip leading slash to get AppDir-relative path
+        QString appDirRelative = fallbackTarget.mid(1); // e.g. "usr/share/codium/codium"
+        QString symlinkDir = QFileInfo(destination).absolutePath();
+        QDir symlinkDirObj(symlinkDir);
+        // We need destRoot to compute the full path
+        if (!destRoot.isEmpty()) {
+            QString fullTargetInDest = QString("%1/%2").arg(destRoot).arg(appDirRelative);
+            QString relPath = symlinkDirObj.relativeFilePath(fullTargetInDest);
+            QFile::remove(destination);
+            return QFile::link(relPath, destination);
+        }
+    }
+
+    // Last resort: use absolute target (old behavior)
+    qWarning() << "Could not make symlink relative, using absolute target:" << absoluteTarget
+               << "for" << destination;
     QFile::remove(destination);
-    return QFile::link(target, destination);
+    return QFile::link(absoluteTarget, destination);
 }
 }
 
@@ -85,11 +185,16 @@ ProcessResult SubprocessWrapper::execute(const QString& command,
 }
 
 bool SubprocessWrapper::copyFile(const QString& source, const QString& destination) {
+    return copyFile(source, destination, QString(), QString());
+}
+
+bool SubprocessWrapper::copyFile(const QString& source, const QString& destination,
+                                 const QString& extractedRoot, const QString& destRoot) {
     QFileInfo sourceInfo(source);
-    if (!sourceInfo.exists()) {
+    if (!sourceInfo.exists() && !sourceInfo.isSymLink()) {
         return false;
     }
-    
+
     QFileInfo destInfo(destination);
     QDir destDir = destInfo.dir();
     if (!destDir.exists()) {
@@ -101,7 +206,7 @@ bool SubprocessWrapper::copyFile(const QString& source, const QString& destinati
     }
 
     if (sourceInfo.isSymLink()) {
-        return recreateSymlink(sourceInfo, destination);
+        return recreateSymlink(sourceInfo, destination, extractedRoot, destRoot);
     }
 
     if (!QFile::copy(source, destination)) {
@@ -113,12 +218,17 @@ bool SubprocessWrapper::copyFile(const QString& source, const QString& destinati
 }
 
 bool SubprocessWrapper::copyDirectory(const QString& source, const QString& destination) {
+    return copyDirectory(source, destination, QString(), QString());
+}
+
+bool SubprocessWrapper::copyDirectory(const QString& source, const QString& destination,
+                                      const QString& extractedRoot, const QString& destRoot) {
     QDir sourceDir(source);
     if (!sourceDir.exists()) {
         qWarning() << "Source directory does not exist:" << source;
         return false;
     }
-    
+
     QDir destDir(destination);
     if (!destDir.exists()) {
         if (!destDir.mkpath(".")) {
@@ -126,7 +236,7 @@ bool SubprocessWrapper::copyDirectory(const QString& source, const QString& dest
             return false;
         }
     }
-    
+
     const QFileInfoList entries = sourceDir.entryInfoList(
         QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot
     );
@@ -135,24 +245,24 @@ bool SubprocessWrapper::copyDirectory(const QString& source, const QString& dest
         const QString destPath = destDir.absoluteFilePath(entry.fileName());
 
         if (entry.isSymLink()) {
-            if (!copyFile(srcPath, destPath)) {
+            if (!copyFile(srcPath, destPath, extractedRoot, destRoot)) {
                 qWarning() << "Failed to copy symlink:" << srcPath << "to" << destPath;
             }
             continue;
         }
 
         if (entry.isDir()) {
-            if (!copyDirectory(srcPath, destPath)) {
+            if (!copyDirectory(srcPath, destPath, extractedRoot, destRoot)) {
                 qWarning() << "Failed to copy subdirectory:" << srcPath;
             }
             continue;
         }
 
-        if (!copyFile(srcPath, destPath)) {
+        if (!copyFile(srcPath, destPath, extractedRoot, destRoot)) {
             qWarning() << "Failed to copy file:" << srcPath << "to" << destPath;
         }
     }
-    
+
     return true;
 }
 

@@ -10,7 +10,7 @@
 int main(int argc, char** argv) {
     QCoreApplication qtApp(argc, argv);
     qtApp.setApplicationName("AppAlchemist");
-    qtApp.setApplicationVersion("1.2.0");
+    qtApp.setApplicationVersion(APPALCHEMIST_VERSION);
     qtApp.setOrganizationName("AppAlchemist");
 
     QCommandLineParser parser;

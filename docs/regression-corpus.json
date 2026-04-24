@@ -4,11 +4,11 @@
   "cases": [
     {
       "id": "local-self-hosted-tarball",
-      "enabled": true,
+      "enabled": false,
       "optional": false,
       "source": {
-        "kind": "repo-file",
-        "path": "packaging/arch/appalchemist-1.0.0.tar.gz"
+        "kind": "generated-package",
+        "acquire": "Run packaging/arch/build-arch.sh to generate the current versioned self-hosted tarball, then point this entry at that file."
       },
       "expected": {
         "format": "tarball",

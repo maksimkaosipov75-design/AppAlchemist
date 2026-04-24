@@ -1011,6 +1011,14 @@ QString CliConverter::extractAndInstallIcon(const QDir& squashfsRoot, const QStr
         while (it.hasNext()) {
             const QString candidatePath = it.next();
             const QString lowerPath = candidatePath.toLower();
+
+            // Skip node_modules, __pycache__, and other non-icon directories
+            if (lowerPath.contains("/node_modules/") || lowerPath.contains("/__pycache__/") ||
+                lowerPath.contains("/test/") || lowerPath.contains("/tests/") ||
+                lowerPath.contains("/.git/")) {
+                continue;
+            }
+
             bool matchesPreferredName = false;
             for (const QString& tryIconName : iconNamesToTry) {
                 if (!tryIconName.isEmpty() && lowerPath.contains(tryIconName.toLower())) {

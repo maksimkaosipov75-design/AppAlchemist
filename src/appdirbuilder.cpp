@@ -1064,7 +1064,8 @@ bool AppDirBuilder::copyResources(const QString& appDirPath, const QString& extr
             
             // copyDirectory will copy all files and subdirectories recursively
             // This includes files in the root of the directory (e.g., codium/snapshot_blob.bin)
-            if (!SubprocessWrapper::copyDirectory(srcPath, destPath)) {
+            // Pass extractedDebDir and appDirPath for proper symlink relativization
+            if (!SubprocessWrapper::copyDirectory(srcPath, destPath, extractedDebDir, appDirPath)) {
                 qWarning() << "Failed to copy share resource:" << srcPath;
             } else {
                 // Verify copy was successful
@@ -1159,8 +1160,8 @@ bool AppDirBuilder::copyResources(const QString& appDirPath, const QString& extr
                     }
                 }
             } else {
-                // For other directories, copy normally
-                if (!SubprocessWrapper::copyDirectory(sourcePath, targetPath)) {
+                // For other directories, copy normally with symlink context
+                if (!SubprocessWrapper::copyDirectory(sourcePath, targetPath, extractedDebDir, appDirPath)) {
                     qWarning() << "Failed to copy resources from:" << sourcePath << "to" << targetPath;
                     // Don't fail completely, just warn
                 }
@@ -1277,26 +1278,39 @@ bool AppDirBuilder::fixDesktopFile(const QString& desktopPath, const PackageMeta
     bool hasCategories = content.contains("Categories=", Qt::CaseInsensitive);
     bool modified = false;
     const QString normalizedExec = "Exec=AppRun";
-    const QString normalizedName = metadata.package.isEmpty() ? QFileInfo(desktopPath).baseName() : metadata.package;
 
-    QRegularExpression execRegex("(?im)^Exec=.*$");
-    if (content.contains(execRegex)) {
-        content.replace(execRegex, normalizedExec);
-        modified = true;
-    } else if (content.contains("[Desktop Entry]", Qt::CaseInsensitive)) {
-        content.replace(QRegularExpression("(?i)(\\[Desktop Entry\\])"), QString("\\1\n%1").arg(normalizedExec));
-        modified = true;
-    }
+    // Only replace Exec= in the main [Desktop Entry] section, not in [Desktop Action] sections
+    // Find the extent of the main section: from [Desktop Entry] to the next [section] or EOF
+    int mainSectionStart = content.indexOf("[Desktop Entry]", 0, Qt::CaseInsensitive);
+    int mainSectionEnd = content.indexOf("\n[", mainSectionStart + 1);
+    if (mainSectionEnd == -1) mainSectionEnd = content.length();
 
-    if (!normalizedName.isEmpty()) {
-        QRegularExpression nameRegex("(?im)^Name=.*$");
-        if (content.contains(nameRegex)) {
-            content.replace(nameRegex, QString("Name=%1").arg(normalizedName));
-        } else if (content.contains("[Desktop Entry]", Qt::CaseInsensitive)) {
-            content.replace(QRegularExpression("(?i)(\\[Desktop Entry\\])"), QString("\\1\nName=%1").arg(normalizedName));
+    if (mainSectionStart >= 0) {
+        QString mainSection = content.mid(mainSectionStart, mainSectionEnd - mainSectionStart);
+        QString restOfFile = content.mid(mainSectionEnd);
+
+        // Replace Exec= only in main section
+        QRegularExpression execRegex("(?im)^Exec=.*$");
+        if (mainSection.contains(execRegex)) {
+            mainSection.replace(execRegex, normalizedExec);
+            modified = true;
+        } else {
+            mainSection.replace(QRegularExpression("(?i)(\\[Desktop Entry\\])"), QString("\\1\n%1").arg(normalizedExec));
+            modified = true;
         }
-        modified = true;
+
+        content = mainSection + restOfFile;
+    } else {
+        // No [Desktop Entry] section found, replace globally as fallback
+        QRegularExpression execRegex("(?im)^Exec=.*$");
+        if (content.contains(execRegex)) {
+            content.replace(execRegex, normalizedExec);
+            modified = true;
+        }
     }
+
+    // Do NOT replace Name= — preserve the original display name from the package
+    // The package name (e.g. "codium") is often not the user-facing name (e.g. "VSCodium")
     
     if (!hasCategories) {
         qDebug() << "Adding missing Categories= to .desktop file";
@@ -1674,15 +1688,29 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
                     // Change to the Electron app directory (important for proper execution)
                     out << "cd \"${HERE}/" << appInfo.baseDir << "\"\n";
                     
-                    // Find .asar file in base directory
+                    // Find .asar file in base directory (search recursively, commonly in resources/)
                     bool usedAsar = false;
                     if (!appInfo.baseDir.isEmpty()) {
                         QString fullBaseDirPath = QString("%1/%2").arg(appDirPath).arg(appInfo.baseDir);
                         QDir baseDir(fullBaseDirPath);
                         if (baseDir.exists()) {
-                            QStringList asarFiles = baseDir.entryList({"*.asar"}, QDir::Files);
+                            // First check resources/ subdirectory (most common for Electron apps)
+                            QDir resourcesDir(QString("%1/resources").arg(fullBaseDirPath));
+                            QStringList asarFiles;
+                            QString asarRelativeDir;
+                            if (resourcesDir.exists()) {
+                                asarFiles = resourcesDir.entryList({"*.asar"}, QDir::Files);
+                                if (!asarFiles.isEmpty()) {
+                                    asarRelativeDir = QString("%1/resources").arg(appInfo.baseDir);
+                                }
+                            }
+                            // Fallback: check root of base directory
+                            if (asarFiles.isEmpty()) {
+                                asarFiles = baseDir.entryList({"*.asar"}, QDir::Files);
+                                asarRelativeDir = appInfo.baseDir;
+                            }
                             if (!asarFiles.isEmpty()) {
-                                QString asarFile = QString("%1/%2").arg(appInfo.baseDir).arg(asarFiles.first());
+                                QString asarFile = QString("%1/%2").arg(asarRelativeDir).arg(asarFiles.first());
                                 out << "# Using .asar file: " << asarFile << "\n";
                                 out << "exec \"${HERE}/" << electronBinaryPath << "\" \"${HERE}/" << asarFile << "\" \"$@\"\n";
                                 usedAsar = true;

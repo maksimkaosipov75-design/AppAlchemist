@@ -15,36 +15,36 @@ Recommended size: 256x256 pixels, PNG format.
 ```bash
 ./packaging/build-deb.sh
 ```
-Result: `build/appalchemist_1.0.0-1_amd64.deb`
+Result: `build/appalchemist_1.5.0-1_amd64.deb`
 
 ### RPM (Fedora/RHEL)
 ```bash
 ./packaging/build-rpm.sh
 ```
-Result: `build/rpmbuild/RPMS/x86_64/appalchemist-1.0.0-1.x86_64.rpm`
+Result: `build/rpmbuild/RPMS/x86_64/appalchemist-1.5.0-1.x86_64.rpm`
 
 ### Arch Linux
 ```bash
 cd packaging/arch
 ./build-arch.sh
 ```
-Result: `appalchemist-1.0.0-1-x86_64.pkg.tar.zst`
+Result: `appalchemist-1.5.0-1-x86_64.pkg.tar.zst`
 
 ## 3. Install the Package
 
 ### DEB
 ```bash
-sudo dpkg -i build/appalchemist_1.0.0-1_amd64.deb
+sudo dpkg -i build/appalchemist_1.5.0-1_amd64.deb
 ```
 
 ### RPM
 ```bash
-sudo rpm -ivh build/rpmbuild/RPMS/x86_64/appalchemist-1.0.0-1.x86_64.rpm
+sudo rpm -ivh build/rpmbuild/RPMS/x86_64/appalchemist-1.5.0-1.x86_64.rpm
 ```
 
 ### Arch
 ```bash
-sudo pacman -U appalchemist-1.0.0-1-x86_64.pkg.tar.zst
+sudo pacman -U appalchemist-1.5.0-1-x86_64.pkg.tar.zst
 ```
 
 ## Notes

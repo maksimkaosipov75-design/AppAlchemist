@@ -1,15 +1,24 @@
 # Build directories
 build/
+build-*/
+build.cache-backup-*/
 packaging/arch/pkg/
 packaging/arch/src/
 squashfs-root/
+.codex
 
 # Release artifacts
 releases/
 *.AppImage
+*.pkg.tar.zst
+*.deb
+*.rpm
+packaging/arch/*.tar.gz
+packaging/arch/usr/
 
 # Large binary files
 thirdparty/appimagetool
+thirdparty/*.AppImage
 
 # Compiled objects
 *.o
@@ -42,7 +51,6 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.log
-
 
 
 

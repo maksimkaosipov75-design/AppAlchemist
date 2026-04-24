@@ -1,13 +1,10 @@
-# Experimental GTK Frontend
+# GTK Frontend
 
-This directory is reserved for the future GNOME-first frontend built with `GTK4` and `libadwaita`.
+This directory contains the active AppAlchemist frontend built with `GTK4` and `libadwaita`.
 
-The migration strategy is:
+The current executable combines:
 
-1. keep the current conversion backend
-2. move GUI state orchestration into shared controllers
-3. attach a new GTK frontend to those controllers
-
-Until the build integration lands, the implementation plan is documented in:
-
-- `docs/gtk4-libadwaita-ui-plan.md`
+1. the GTK application shell in `app.cpp` and `app.h`
+2. the main window implementation in `app_window.cpp` and `app_window.h`
+3. the CLI entrypoint in `main.cpp`
+4. the shared conversion backend from `src/` and `include/`

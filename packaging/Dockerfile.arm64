@@ -8,7 +8,9 @@ RUN apt-get update && apt-get install -y \
     cmake \
     qt6-base-dev \
     qt6-base-dev-tools \
-    libqt6widgets6 \
+    libgtk-4-dev \
+    libadwaita-1-dev \
+    pkg-config \
     wget \
     file \
     && rm -rf /var/lib/apt/lists/*
@@ -23,7 +25,6 @@ RUN chmod +x packaging/build-appimage-arm64.sh && \
     ./packaging/build-appimage-arm64.sh
 
 # The output will be in /build/releases/AppAlchemist-ARM64.AppImage
-
 
 
 

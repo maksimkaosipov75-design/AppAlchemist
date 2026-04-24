@@ -1,25 +1,28 @@
 Name:           appalchemist
-Version:        1.0.0
+Version:        1.5.0
 Release:        1%{?dist}
-Summary:        Convert .deb and .rpm packages to AppImage format
+Summary:        Convert Linux packages and archives to AppImage format
 License:        MIT
-URL:            https://github.com/appalchemist/appalchemist
+URL:            https://github.com/maksimkaosipov75-design/AppAlchemist
 Source0:        %{name}-%{version}.tar.gz
 
 BuildRequires:  cmake >= 3.15
 BuildRequires:  qt6-qtbase-devel
-BuildRequires:  qt6-qtbase-private-devel
 BuildRequires:  gcc-c++
+BuildRequires:  gtk4-devel
+BuildRequires:  libadwaita-devel
+BuildRequires:  pkgconf-pkg-config
 Requires:       qt6-qtbase
+Requires:       gtk4
+Requires:       libadwaita
 
 %description
-AppAlchemist is a graphical application that converts Linux package
-formats (.deb and .rpm) into self-contained AppImage files that can
-run on any Linux distribution without installation.
+AppAlchemist converts Linux application packages and archives into
+portable AppImage bundles through a GTK interface and CLI workflow.
 
 Features:
-- Drag-and-drop interface for easy conversion
-- Support for both Debian (.deb) and RPM (.rpm) packages
+- GTK4/libadwaita interface for package conversion
+- Support for Debian (.deb), RPM (.rpm), and archive inputs
 - Automatic dependency analysis and bundling
 - Creates portable AppImage files
 
@@ -68,12 +71,9 @@ fi
 %{_datadir}/icons/hicolor/*/apps/appalchemist.png
 
 %changelog
-* Mon Jan 05 2025 AppAlchemist Team <appalchemist@example.com> - 1.0.0-1
-- Initial release
-- Support for .deb and .rpm package conversion
-- Graphical user interface with drag-and-drop
-- Automatic dependency bundling
-
+* Fri Apr 24 2026 AppAlchemist Team <appalchemist@example.com> - 1.5.0-1
+- Synchronize packaging metadata with the public v1.5.0 release
+- Document .deb, .rpm and archive conversion workflows
 
 
 

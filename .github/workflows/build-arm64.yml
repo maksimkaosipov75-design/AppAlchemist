@@ -30,7 +30,7 @@ jobs:
             -w /workspace \
             ubuntu:22.04 bash -c "
               apt-get update && \
-              apt-get install -y build-essential cmake qt6-base-dev qt6-base-dev-tools wget file && \
+              apt-get install -y build-essential cmake qt6-base-dev qt6-base-dev-tools libgtk-4-dev libadwaita-1-dev pkg-config wget file && \
               chmod +x packaging/build-appimage-arm64.sh && \
               ./packaging/build-appimage-arm64.sh
             "
@@ -49,7 +49,6 @@ jobs:
           files: releases/AppAlchemist-ARM64.AppImage
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
 
 
 

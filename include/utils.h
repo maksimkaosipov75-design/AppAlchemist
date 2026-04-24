@@ -30,7 +30,11 @@ public:
                                          int timeoutMs = 30000);
     
     static bool copyFile(const QString& source, const QString& destination);
+    static bool copyFile(const QString& source, const QString& destination,
+                         const QString& extractedRoot, const QString& destRoot);
     static bool copyDirectory(const QString& source, const QString& destination);
+    static bool copyDirectory(const QString& source, const QString& destination,
+                              const QString& extractedRoot, const QString& destRoot);
     static bool createDirectory(const QString& path);
     static bool removeDirectory(const QString& path);
     static QString generateHash(const QString& filePath);

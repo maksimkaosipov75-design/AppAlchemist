@@ -14,7 +14,7 @@ echo "=== Building AppAlchemist Arch Linux Package ==="
 rm -rf "$ARCH_DIR/src" "$ARCH_DIR/pkg" "$ARCH_DIR/appalchemist-*.tar.gz"
 
 # Create source tarball
-VERSION="1.0.0"
+VERSION="$(grep -E '^project\(appalchemist VERSION' CMakeLists.txt | sed -E 's/.*VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
 mkdir -p "$BUILD_DIR/appalchemist-$VERSION"
 cp -r src include ui CMakeLists.txt README.md "$BUILD_DIR/appalchemist-$VERSION/"
 cp -r packaging "$BUILD_DIR/appalchemist-$VERSION/"
@@ -31,7 +31,6 @@ makepkg -si
 
 echo ""
 echo "=== Arch Linux Package Built Successfully ==="
-
 
 
 

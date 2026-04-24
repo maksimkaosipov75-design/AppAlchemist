@@ -99,44 +99,11 @@ AppInfo AppDetector::detectApp(const QString& appDirPath,
         info.baseDir = electronBaseDir;
         info.executablePath = mainExecutable;
         info.needsElectronPath = true;
-        
-        // Determine working directory
-        QString relativeExecPath = mainExecutable;
-        if (relativeExecPath.contains("/data/")) {
-            relativeExecPath = relativeExecPath.section("/data/", 1);
-        }
-        if (relativeExecPath.startsWith("/")) {
-            if (relativeExecPath.contains("/usr/share/")) {
-                // VS Code style: usr/share/code/bin/code
-                QString path = relativeExecPath.section("/usr/share/", 1);
-                path = path.section('/', 0, -2); // Remove filename
-                info.workingDir = QString("${HERE}/usr/share/%1").arg(path);
-            } else if (relativeExecPath.contains("/opt/") || relativeExecPath.contains("opt/")) {
-                // Opt-based: opt/yandex-music
-                QString path = relativeExecPath;
-                if (path.contains("/opt/")) {
-                    path = path.section("/opt/", 1);
-                } else {
-                    path = path.section("opt/", 1);
-                }
-                path = path.section('/', 0, 0); // Get first directory
-                info.workingDir = QString("${HERE}/opt/%1").arg(path);
-            } else {
-                info.workingDir = "${HERE}/usr/bin";
-            }
-        } else {
-            // Already relative
-            if (relativeExecPath.contains("usr/share/")) {
-                QString path = relativeExecPath.section('/', 0, -2);
-                info.workingDir = QString("${HERE}/%1").arg(path);
-            } else if (relativeExecPath.contains("opt/")) {
-                QString path = relativeExecPath.section('/', 0, 1);
-                info.workingDir = QString("${HERE}/%1").arg(path);
-            } else {
-                info.workingDir = "${HERE}/usr/bin";
-            }
-        }
-        
+
+        // For Electron apps, working directory should always be the base directory
+        // (e.g. usr/share/codium/) regardless of where the main executable is
+        info.workingDir = QString("${HERE}/%1").arg(electronBaseDir);
+
         return info;
     }
     
@@ -218,28 +185,29 @@ QString AppDetector::findElectronBaseDir(const QString& appDirPath) {
         }
     }
     
-    // Search recursively in usr/share and opt for Electron indicators
+    // Search in immediate subdirectories of usr/share, opt, usr/lib for Electron indicators
+    // Only check one level deep to avoid matching nested directories like resources/
     QStringList searchDirs = {
         QString("%1/usr/share").arg(appDirPath),
         QString("%1/opt").arg(appDirPath),
         QString("%1/usr/lib").arg(appDirPath)
     };
-    
+
     for (const QString& searchDir : searchDirs) {
-        if (!QDir(searchDir).exists()) continue;
-        
-        QDirIterator it(searchDir, QDirIterator::Subdirectories);
-        while (it.hasNext()) {
-            QString path = it.next();
-            QFileInfo info(path);
-            if (info.isDir() && hasElectronIndicators(path)) {
-                // Get relative path from appDirPath
-                QString relativePath = QDir(appDirPath).relativeFilePath(path);
+        QDir dir(searchDir);
+        if (!dir.exists()) continue;
+
+        // Only iterate immediate subdirectories (one level deep)
+        QStringList subdirs = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QString& subdir : subdirs) {
+            QString fullPath = dir.absoluteFilePath(subdir);
+            if (hasElectronIndicators(fullPath)) {
+                QString relativePath = QDir(appDirPath).relativeFilePath(fullPath);
                 return relativePath;
             }
         }
     }
-    
+
     return QString();
 }
 

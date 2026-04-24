@@ -21,7 +21,7 @@ make -j$(nproc)
 
 # Create source tarball
 cd "$PROJECT_DIR"
-VERSION="1.0.0"
+VERSION="$(grep -E '^project\(appalchemist VERSION' CMakeLists.txt | sed -E 's/.*VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
 mkdir -p "$BUILD_DIR/appalchemist-$VERSION"
 cp -r src include ui CMakeLists.txt README.md packaging "$BUILD_DIR/appalchemist-$VERSION/"
 if [ -d "assets" ]; then
@@ -47,4 +47,3 @@ dpkg-buildpackage -us -uc -b
 echo ""
 echo "=== DEB Package Built Successfully ==="
 echo "Package location: $BUILD_DIR/appalchemist_${VERSION}-1_amd64.deb"
-

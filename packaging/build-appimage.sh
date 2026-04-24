@@ -407,7 +407,7 @@ fi
 echo "Using appimagetool: $APPIMAGETOOL"
 
 # Get version from CMakeLists.txt or use default
-VERSION=$(grep -E "^project\(appalchemist VERSION" "$PROJECT_DIR/CMakeLists.txt" | sed -E 's/.*VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/' || echo "1.0.0")
+VERSION=$(grep -E "^project\(appalchemist VERSION" "$PROJECT_DIR/CMakeLists.txt" | sed -E 's/.*VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/' || echo "1.5.0")
 APPIMAGE_NAME="appalchemist-${VERSION}-${ARCH_NAME}.AppImage"
 APPIMAGE_PATH="$OUTPUT_DIR/$APPIMAGE_NAME"
 

@@ -21,7 +21,7 @@ make -j$(nproc)
 
 # Create source tarball
 cd "$PROJECT_DIR"
-VERSION="1.0.0"
+VERSION="$(grep -E '^project\(appalchemist VERSION' CMakeLists.txt | sed -E 's/.*VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
 mkdir -p "$BUILD_DIR/appalchemist-$VERSION"
 cp -r src include ui CMakeLists.txt README.md packaging "$BUILD_DIR/appalchemist-$VERSION/"
 if [ -d "assets" ]; then
@@ -52,4 +52,3 @@ rpmbuild --define "_topdir $(pwd)" -ba SPECS/appalchemist.spec
 echo ""
 echo "=== RPM Package Built Successfully ==="
 echo "Package location: $BUILD_DIR/rpmbuild/RPMS/x86_64/appalchemist-${VERSION}-1.x86_64.rpm"
-

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
 
-project(appalchemist VERSION 1.1.0 LANGUAGES CXX)
+project(appalchemist VERSION 1.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -105,6 +105,7 @@ if(GTK_FRONTEND_FOUND)
 
     target_compile_definitions(appalchemist
         PRIVATE
+            APPALCHEMIST_VERSION="${PROJECT_VERSION}"
             APPALCHEMIST_GTK_STYLE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/frontend/gtk/style.css"
     )
 

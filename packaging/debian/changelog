@@ -1,12 +1,10 @@
-appalchemist (1.0.0-1) unstable; urgency=medium
+appalchemist (1.5.0-1) unstable; urgency=medium
 
-  * Initial release
-  * Support for .deb and .rpm package conversion
-  * Graphical user interface with drag-and-drop
-  * Automatic dependency bundling
+  * Synchronize packaging metadata with the public v1.5.0 release.
+  * Document .deb, .rpm and archive conversion workflows.
+  * Keep GTK4/libadwaita frontend requirements visible.
 
- -- AppAlchemist Team <appalchemist@example.com>  Mon, 05 Jan 2025 13:00:00 +0000
-
+ -- AppAlchemist Team <appalchemist@example.com>  Fri, 24 Apr 2026 13:00:00 +0000
 
 
 
