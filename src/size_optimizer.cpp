@@ -187,6 +187,15 @@ bool SizeOptimizer::removeDocumentation(const QString& appDirPath) {
 }
 
 bool SizeOptimizer::shouldKeepLocale(const QString& localeName) {
+    // English is the universal fallback: Chromium/Electron crashes on startup
+    // if its default locale pak (en-US) is missing, and most apps fall back to
+    // English resources. C/POSIX are runtime locales, not translations.
+    // Note: the AppImage runs on machines whose locale differs from the
+    // build machine, so the build machine's locale alone is not enough.
+    if (localeName.startsWith("en") || localeName == "C" || localeName == "POSIX") {
+        return true;
+    }
+
     // Always keep system locale
     QString systemLocale = QLocale::system().name();
     if (localeName == systemLocale || localeName.startsWith(systemLocale.split('_').first())) {
