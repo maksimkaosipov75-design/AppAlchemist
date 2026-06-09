@@ -23,6 +23,15 @@ public:
                                  int timeoutMs = 30000,
                                  const QProcessEnvironment& environment = QProcessEnvironment());
     
+    // Runs `producer args | consumer args` without going through a shell,
+    // so paths with quotes/spaces/special characters are passed safely.
+    static ProcessResult executePipeline(const QString& producerCommand,
+                                         const QStringList& producerArguments,
+                                         const QString& consumerCommand,
+                                         const QStringList& consumerArguments,
+                                         const QString& workingDirectory = {},
+                                         int timeoutMs = 30000);
+
     static ProcessResult executeWithSudo(const QString& command,
                                          const QStringList& arguments = {},
                                          const QString& password = {},

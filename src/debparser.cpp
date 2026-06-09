@@ -292,11 +292,13 @@ DebMetadata DebParser::parseMetadata(const QString& extractDir) {
             }
             QFileInfo execInfo(exec);
             QString baseName = execInfo.baseName().toLower();
-            QString packageName = metadata.package.toLower();
-            
-            if (baseName == packageName || 
-                baseName.contains(packageName) ||
-                packageName.contains(baseName)) {
+            QString lowerPackageName = metadata.package.toLower();
+
+            // An empty package name must never match: contains("") is always true
+            if (!lowerPackageName.isEmpty() &&
+                (baseName == lowerPackageName ||
+                 baseName.contains(lowerPackageName) ||
+                 lowerPackageName.contains(baseName))) {
                 metadata.mainExecutable = exec;
                 break;
             }
@@ -677,13 +679,13 @@ QStringList DebParser::searchInDirectory(const QString& dir, const QStringList& 
                 results.append(entry.absoluteFilePath());
             }
         }
-        
-        // Recursively search subdirectories
-        QFileInfoList subdirs = dirObj.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
-        for (const QFileInfo& subdir : subdirs) {
-            results.append(searchInDirectory(subdir.absoluteFilePath(), patterns, executableOnly));
-        }
     }
-    
+
+    // Recursively search subdirectories (once, not once per pattern)
+    QFileInfoList subdirs = dirObj.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QFileInfo& subdir : subdirs) {
+        results.append(searchInDirectory(subdir.absoluteFilePath(), patterns, executableOnly));
+    }
+
     return results;
 }

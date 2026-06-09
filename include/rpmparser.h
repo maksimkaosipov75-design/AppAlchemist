@@ -13,7 +13,7 @@ public:
     
     bool validateRpmFile(const QString& rpmPath);
     bool extractRpm(const QString& rpmPath, const QString& extractDir);
-    PackageMetadata parseMetadata(const QString& extractDir);
+    PackageMetadata parseMetadata(const QString& extractDir, const QString& packageName = QString());
     
 private:
     QString m_tempDir;

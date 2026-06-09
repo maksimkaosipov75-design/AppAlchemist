@@ -184,6 +184,69 @@ ProcessResult SubprocessWrapper::execute(const QString& command,
     return result;
 }
 
+ProcessResult SubprocessWrapper::executePipeline(const QString& producerCommand,
+                                                 const QStringList& producerArguments,
+                                                 const QString& consumerCommand,
+                                                 const QStringList& consumerArguments,
+                                                 const QString& workingDirectory,
+                                                 int timeoutMs) {
+    ProcessResult result;
+    result.success = false;
+
+    QProcess producer;
+    QProcess consumer;
+
+    producer.setProgram(producerCommand);
+    producer.setArguments(producerArguments);
+    producer.setStandardOutputProcess(&consumer);
+
+    consumer.setProgram(consumerCommand);
+    consumer.setArguments(consumerArguments);
+    if (!workingDirectory.isEmpty()) {
+        consumer.setWorkingDirectory(workingDirectory);
+    }
+
+    producer.start();
+    consumer.start();
+
+    if (!producer.waitForStarted(timeoutMs) || !consumer.waitForStarted(timeoutMs)) {
+        producer.kill();
+        consumer.kill();
+        result.errorMessage = QString("Failed to start pipeline: %1 | %2")
+            .arg(producerCommand, consumerCommand);
+        return result;
+    }
+
+    if (!producer.waitForFinished(timeoutMs) || !consumer.waitForFinished(timeoutMs)) {
+        producer.kill();
+        consumer.kill();
+        result.errorMessage = QString("Pipeline timed out: %1 | %2")
+            .arg(producerCommand, consumerCommand);
+        return result;
+    }
+
+    result.exitCode = consumer.exitCode();
+    result.stdoutOutput = QString::fromUtf8(consumer.readAllStandardOutput());
+    result.stderrOutput = QString::fromUtf8(consumer.readAllStandardError());
+
+    const QString producerErrors = QString::fromUtf8(producer.readAllStandardError());
+    if (!producerErrors.isEmpty()) {
+        result.stderrOutput += producerErrors;
+    }
+
+    result.success = (producer.exitCode() == 0 && consumer.exitCode() == 0);
+    if (!result.success) {
+        result.errorMessage = QString("Pipeline failed (%1 exit %2, %3 exit %4): %5")
+            .arg(producerCommand)
+            .arg(producer.exitCode())
+            .arg(consumerCommand)
+            .arg(consumer.exitCode())
+            .arg(result.stderrOutput.isEmpty() ? result.stdoutOutput : result.stderrOutput);
+    }
+
+    return result;
+}
+
 bool SubprocessWrapper::copyFile(const QString& source, const QString& destination) {
     return copyFile(source, destination, QString(), QString());
 }
