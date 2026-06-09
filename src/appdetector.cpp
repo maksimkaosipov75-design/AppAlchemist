@@ -455,42 +455,36 @@ QString AppDetector::replaceScriptPaths(const QString& scriptContent,
 
 bool AppDetector::hasElectronIndicators(const QString& dirPath) {
     if (!QDir(dirPath).exists()) return false;
-    
-    // Check for Electron indicators
-    QStringList electronFiles = {
-        "snapshot_blob.bin",
-        "v8_context_snapshot.bin",
-        "resources.pak",
-        "electron",
-        "Discord",          // Discord executable
-        "discord",          // discord lowercase
-        "code",             // VS Code executable
-        "codium",           // VSCodium executable
-        "slack",            // Slack
-        "teams",            // Teams
-        "spotify",          // Spotify
-        "chrome_crashpad_handler"  // Common in Electron/Chrome apps
+
+    // Require STRONG Electron/Chromium evidence. A bare "resources/" directory
+    // or a file that merely shares a name with a known app ("code", "discord",
+    // ...) is common in completely unrelated applications and used to cause
+    // false Electron classification, which generated a broken AppRun.
+
+    auto fileExists = [&dirPath](const char* name) {
+        return QFile::exists(QString("%1/%2").arg(dirPath).arg(name));
     };
-    
-    // Check for electron binary or resources
-    for (const QString& file : electronFiles) {
-        QString filePath = QString("%1/%2").arg(dirPath).arg(file);
-        if (QFile::exists(filePath)) {
-            return true;
-        }
-    }
-    
-    // Check for resources directory
-    if (QDir(QString("%1/resources").arg(dirPath)).exists()) {
+
+    // V8 snapshots only ship with Electron/Chromium runtimes
+    if (fileExists("v8_context_snapshot.bin") || fileExists("snapshot_blob.bin")) {
         return true;
     }
-    
-    // Check for .asar files (Electron app bundles)
+
+    // resources.pak alone is Chromium-ish; require a second runtime artifact
+    if (fileExists("resources.pak") &&
+        (fileExists("chrome_crashpad_handler") ||
+         fileExists("chrome-sandbox") ||
+         fileExists("libffmpeg.so") ||
+         fileExists("icudtl.dat"))) {
+        return true;
+    }
+
+    // An app.asar bundle is definitive
     QDirIterator it(dirPath, {"*.asar"}, QDir::Files, QDirIterator::Subdirectories);
     if (it.hasNext()) {
         return true;
     }
-    
+
     return false;
 }
 

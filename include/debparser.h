@@ -24,6 +24,12 @@ struct PackageMetadata {
 // Alias for backward compatibility
 using DebMetadata = PackageMetadata;
 
+class QDir;
+
+// Picks the primary application desktop entry, skipping url handlers,
+// autostart helpers and NoDisplay entries. Shared by DEB and RPM parsers.
+QString selectMainDesktopFile(const QDir& dir, const QStringList& desktopFiles);
+
 class DebParser {
 public:
     DebParser();
