@@ -88,6 +88,21 @@ QString sanitizeDesktopCategories(const QString& categoriesValue) {
     return QString("Categories=%1;").arg(sanitizedCategories.join(';'));
 }
 
+// Icon= values are often reverse-DNS ids ("org.gnome.Foo") where
+// QFileInfo::baseName() would wrongly truncate at the first dot.
+// Strip the directory part and a trailing image extension only.
+QString iconNameFromValue(const QString& iconValue) {
+    QString name = QFileInfo(iconValue.trimmed()).fileName();
+    static const QStringList imageExtensions = {".png", ".svg", ".svgz", ".xpm", ".ico"};
+    for (const QString& ext : imageExtensions) {
+        if (name.endsWith(ext, Qt::CaseInsensitive)) {
+            name.chop(ext.length());
+            break;
+        }
+    }
+    return name;
+}
+
 QString normalizeDesktopCandidateName(QString value) {
     value = value.toLower();
     value.replace(QRegularExpression("\\.desktop$"), "");
@@ -538,8 +553,8 @@ bool AppDirBuilder::buildAppDir(const QString& appDirPath,
                     QRegularExpressionMatch match = iconRegex.match(content);
                     if (match.hasMatch()) {
                         QString iconValue = match.captured(1).trimmed();
-                        // Remove path, keep only name
-                        QString iconName = QFileInfo(iconValue).baseName();
+                        // Remove path and image extension, keep the full icon name
+                        QString iconName = iconNameFromValue(iconValue);
                         if (!iconName.isEmpty()) {
                             content.replace(iconRegex, QString("Icon=%1").arg(iconName));
                             
@@ -573,8 +588,8 @@ bool AppDirBuilder::buildAppDir(const QString& appDirPath,
                     QString line = in.readLine().trimmed();
                     if (line.startsWith("Icon=", Qt::CaseInsensitive)) {
                         iconNameFromDesktop = line.mid(5).trimmed();
-                        // Remove path, keep only name
-                        iconNameFromDesktop = QFileInfo(iconNameFromDesktop).baseName();
+                        // Remove path and image extension, keep the full icon name
+                        iconNameFromDesktop = iconNameFromValue(iconNameFromDesktop);
                         qDebug() << "Found Icon= in .desktop file:" << iconNameFromDesktop;
                         break;
                     }
@@ -707,7 +722,7 @@ bool AppDirBuilder::buildAppDir(const QString& appDirPath,
                         desktopFile.close();
                         
                         // Replace Icon= with just the icon name (no path, no extension in Icon=)
-                        QString iconNameOnly = QFileInfo(rootIconName).baseName();
+                        QString iconNameOnly = iconNameFromValue(rootIconName);
                         QRegularExpression iconRegex("(?i)^Icon=(.+)$", QRegularExpression::MultilineOption);
                         content.replace(iconRegex, QString("Icon=%1").arg(iconNameOnly));
                         
@@ -891,15 +906,10 @@ bool AppDirBuilder::copyExecutables(const QString& appDirPath,
             // Use universal path replacement
             content = AppDetector::replaceScriptPaths(content, appBaseDir);
             
-            // Fix shebang lines that contain ${HERE} - variables don't work in shebang
-            // Replace #!${HERE}/usr/bin/env with #!/usr/bin/env
-            // Replace #!${HERE}/bin/bash with #!/bin/bash
-            // Replace #!${HERE}/usr/bin/bash with #!/usr/bin/bash
-            content.replace(QRegularExpression(R"(^#!\$\{HERE\}/usr/bin/env\s+)"), "#!/usr/bin/env ");
-            content.replace(QRegularExpression(R"(^#!\$\{HERE\}/bin/bash\s*)"), "#!/bin/bash");
-            content.replace(QRegularExpression(R"(^#!\$\{HERE\}/usr/bin/bash\s*)"), "#!/usr/bin/bash");
-            content.replace(QRegularExpression(R"(^#!\$\{HERE\}/bin/sh\s*)"), "#!/bin/sh");
-            content.replace(QRegularExpression(R"(^#!\$\{HERE\}/usr/bin/sh\s*)"), "#!/usr/bin/sh");
+            // Fix the shebang line if path replacement injected ${HERE} into it -
+            // the kernel does not expand variables in shebangs. This must work for
+            // ANY interpreter (sh, bash, env, perl, python, ...), not just a few.
+            content.replace(QRegularExpression(R"(^#!\s*\$\{HERE\}/)"), "#!/");
             
             QFile targetFile(targetPath);
             if (!targetFile.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
@@ -1357,6 +1367,22 @@ bool AppDirBuilder::fixDesktopFile(const QString& desktopPath, const PackageMeta
     QRegularExpression noDisplayRegex("(?im)^NoDisplay\\s*=\\s*true\\s*$");
     if (content.contains(noDisplayRegex)) {
         content.replace(noDisplayRegex, "NoDisplay=false");
+        modified = true;
+    }
+
+    // TryExec points at a system path that won't exist on the target machine,
+    // which makes desktop environments hide the AppImage menu entry.
+    QRegularExpression tryExecRegex("(?im)^TryExec\\s*=.*$[\r\n]*");
+    if (content.contains(tryExecRegex)) {
+        content.remove(tryExecRegex);
+        modified = true;
+    }
+
+    // DBusActivatable requires a D-Bus service that the AppImage does not provide;
+    // leaving it true breaks launching from GNOME Shell.
+    QRegularExpression dbusActivatableRegex("(?im)^DBusActivatable\\s*=\\s*true\\s*$");
+    if (content.contains(dbusActivatableRegex)) {
+        content.replace(dbusActivatableRegex, "DBusActivatable=false");
         modified = true;
     }
     

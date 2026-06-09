@@ -292,11 +292,13 @@ DebMetadata DebParser::parseMetadata(const QString& extractDir) {
             }
             QFileInfo execInfo(exec);
             QString baseName = execInfo.baseName().toLower();
-            QString packageName = metadata.package.toLower();
-            
-            if (baseName == packageName || 
-                baseName.contains(packageName) ||
-                packageName.contains(baseName)) {
+            QString lowerPackageName = metadata.package.toLower();
+
+            // An empty package name must never match: contains("") is always true
+            if (!lowerPackageName.isEmpty() &&
+                (baseName == lowerPackageName ||
+                 baseName.contains(lowerPackageName) ||
+                 lowerPackageName.contains(baseName))) {
                 metadata.mainExecutable = exec;
                 break;
             }
@@ -458,18 +460,53 @@ QStringList DebParser::findExecutables(const QString& extractDir) {
     return filtered;
 }
 
+QString selectMainDesktopFile(const QDir& dir, const QStringList& desktopFiles) {
+    // Packages often ship several desktop entries (url handlers, autostart
+    // helpers). Picking the alphabetically first one can select a handler whose
+    // Exec=/Icon= mislead main-executable and icon detection.
+    QString fallback = desktopFiles.first();
+
+    for (const QString& fileName : desktopFiles) {
+        const QString lowerName = fileName.toLower();
+        if (lowerName.contains("url-handler") ||
+            lowerName.contains("handler") ||
+            lowerName.contains("autostart") ||
+            lowerName.contains("uninstall")) {
+            continue;
+        }
+
+        QFile file(dir.absoluteFilePath(fileName));
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            continue;
+        }
+        const QString content = QString::fromUtf8(file.readAll());
+        file.close();
+
+        if (content.contains("NoDisplay=true", Qt::CaseInsensitive)) {
+            continue;
+        }
+        if (!content.contains("Type=Application", Qt::CaseInsensitive)) {
+            continue;
+        }
+
+        return fileName;
+    }
+
+    return fallback;
+}
+
 QString DebParser::findDesktopFile(const QString& extractDir) {
     QString dataDir = QString("%1/data").arg(extractDir);
     QString desktopDir = QString("%1/usr/share/applications").arg(dataDir);
-    
+
     QDir dir(desktopDir);
     if (dir.exists()) {
         QStringList desktopFiles = dir.entryList({"*.desktop"}, QDir::Files);
         if (!desktopFiles.isEmpty()) {
-            return dir.absoluteFilePath(desktopFiles.first());
+            return dir.absoluteFilePath(selectMainDesktopFile(dir, desktopFiles));
         }
     }
-    
+
     return QString();
 }
 
@@ -677,13 +714,13 @@ QStringList DebParser::searchInDirectory(const QString& dir, const QStringList& 
                 results.append(entry.absoluteFilePath());
             }
         }
-        
-        // Recursively search subdirectories
-        QFileInfoList subdirs = dirObj.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
-        for (const QFileInfo& subdir : subdirs) {
-            results.append(searchInDirectory(subdir.absoluteFilePath(), patterns, executableOnly));
-        }
     }
-    
+
+    // Recursively search subdirectories (once, not once per pattern)
+    QFileInfoList subdirs = dirObj.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QFileInfo& subdir : subdirs) {
+        results.append(searchInDirectory(subdir.absoluteFilePath(), patterns, executableOnly));
+    }
+
     return results;
 }

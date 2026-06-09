@@ -178,9 +178,17 @@ PackageMetadata PackageExtractor::extractRpmMetadata(const QString& packagePath,
         }
     }
 
-    const PackageMetadata extractedMetadata = m_rpmParser->parseMetadata(extractedDir);
+    metadata.depends = extractRpmDependencies(packagePath);
+
+    // Pass the resolved package name into the parser so the main-executable
+    // heuristics can use it (instead of running with an empty name).
+    const PackageMetadata extractedMetadata = m_rpmParser->parseMetadata(extractedDir, metadata.package);
     if (metadata.package.isEmpty()) {
-        return extractedMetadata;
+        PackageMetadata fallback = extractedMetadata;
+        if (fallback.depends.isEmpty()) {
+            fallback.depends = metadata.depends;
+        }
+        return fallback;
     }
 
     metadata.executables = extractedMetadata.executables;
@@ -199,4 +207,41 @@ PackageMetadata PackageExtractor::extractRpmMetadata(const QString& packagePath,
     }
 
     return metadata;
+}
+
+QStringList PackageExtractor::extractRpmDependencies(const QString& packagePath) const {
+    QStringList depends;
+
+    const ProcessResult rpmReqs = SubprocessWrapper::execute("rpm", {"-qpR", packagePath});
+    if (!rpmReqs.success || rpmReqs.stdoutOutput.isEmpty()) {
+        return depends;
+    }
+
+    const QStringList lines = rpmReqs.stdoutOutput.split('\n', Qt::SkipEmptyParts);
+    for (const QString& rawLine : lines) {
+        QString dep = rawLine.trimmed();
+        if (dep.isEmpty()) {
+            continue;
+        }
+
+        // Skip internal/synthetic requirements that are not packages
+        if (dep.startsWith("rpmlib(") ||
+            dep.startsWith("config(") ||
+            dep.startsWith("rtld(") ||
+            dep.startsWith("/")) {
+            continue;
+        }
+
+        // Strip version constraints: "libfoo >= 1.2" -> "libfoo"
+        const int spacePos = dep.indexOf(' ');
+        if (spacePos > 0) {
+            dep = dep.left(spacePos);
+        }
+
+        if (!dep.isEmpty() && !depends.contains(dep)) {
+            depends.append(dep);
+        }
+    }
+
+    return depends;
 }

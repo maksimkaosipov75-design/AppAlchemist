@@ -42,14 +42,18 @@ bool RpmParser::validateRpmFile(const QString& rpmPath) {
     QByteArray header = file.read(4);
     file.close();
     
-    // RPM magic numbers: 0xed 0xab 0xee 0xdb (old) or "drpm" (new)
-    if (header.size() >= 4 && 
-        ((header[0] == (char)0xed && header[1] == (char)0xab && 
-          header[2] == (char)0xee && header[3] == (char)0xdb) ||
-         header.startsWith("drpm"))) {
+    // RPM lead magic: 0xed 0xab 0xee 0xdb. Delta RPMs ("drpm") are rejected:
+    // rpm2cpio/cpio cannot unpack them, so accepting them only defers the failure.
+    if (header.size() >= 4 &&
+        header[0] == (char)0xed && header[1] == (char)0xab &&
+        header[2] == (char)0xee && header[3] == (char)0xdb) {
         return true;
     }
-    
+
+    if (header.startsWith("drpm")) {
+        qWarning() << "Delta RPM (.drpm) packages are not supported:" << rpmPath;
+    }
+
     return false;
 }
 
@@ -84,13 +88,14 @@ bool RpmParser::extractRpm(const QString& rpmPath, const QString& extractDir) {
     }
     
     if (hasRpm2cpio && hasCpio) {
-        // Use rpm2cpio | cpio
-        // Pipe rpm2cpio output to cpio, cd into extract directory first
-        ProcessResult cpioResult = SubprocessWrapper::execute("sh", {
-            "-c", 
-            QString("cd '%1' && rpm2cpio '%2' | cpio -idmv 2>&1").arg(extractPath).arg(rpmPath)
-        }, extractPath);
-        
+        // Pipe rpm2cpio output into cpio directly (no shell, no quoting issues)
+        ProcessResult cpioResult = SubprocessWrapper::executePipeline(
+            "rpm2cpio", {rpmPath},
+            "cpio", {"-idm", "--quiet"},
+            extractPath,
+            300000  // large packages can take a while to unpack
+        );
+
         // Check if extraction was successful by looking for extracted files
         QDir extractPathDir(extractPath);
         bool hasFiles = extractPathDir.exists() && 
@@ -188,14 +193,14 @@ bool RpmParser::extractRpm(const QString& rpmPath, const QString& extractDir) {
     return true;
 }
 
-PackageMetadata RpmParser::parseMetadata(const QString& extractDir) {
+PackageMetadata RpmParser::parseMetadata(const QString& extractDir, const QString& packageName) {
     PackageMetadata metadata;
-    
-    // Try to get metadata from the original RPM file if we have the path
-    // This is more reliable than parsing extracted files
-    QString rpmPath = m_tempDir; // We need to store the RPM path
-    // For now, try to query metadata from extracted structure
-    
+
+    // The package name from the RPM header (queried by the caller) must be
+    // known before the main-executable heuristics below run, otherwise
+    // name-based matching degenerates into "first executable wins".
+    metadata.package = packageName;
+
     // Find .desktop file first (for Java apps and proper entry point)
     QString desktopFile = findDesktopFile(extractDir);
     if (!desktopFile.isEmpty()) {
@@ -283,11 +288,13 @@ PackageMetadata RpmParser::parseMetadata(const QString& extractDir) {
             }
             QFileInfo execInfo(exec);
             QString baseName = execInfo.baseName().toLower();
-            QString packageName = metadata.package.toLower();
-            
-            if (baseName == packageName || 
-                baseName.contains(packageName) ||
-                packageName.contains(baseName)) {
+            QString lowerPackageName = metadata.package.toLower();
+
+            // An empty package name must never match: contains("") is always true
+            if (!lowerPackageName.isEmpty() &&
+                (baseName == lowerPackageName ||
+                 baseName.contains(lowerPackageName) ||
+                 lowerPackageName.contains(baseName))) {
                 metadata.mainExecutable = exec;
                 break;
             }
@@ -568,25 +575,25 @@ QString RpmParser::findIcon(const QString& extractDir) {
 QString RpmParser::findDesktopFile(const QString& extractDir) {
     QString dataDir = QString("%1/data").arg(extractDir);
     QString desktopDir = QString("%1/usr/share/applications").arg(dataDir);
-    
+
     QDir dir(desktopDir);
     if (dir.exists()) {
         QStringList desktopFiles = dir.entryList({"*.desktop"}, QDir::Files);
         if (!desktopFiles.isEmpty()) {
-            return dir.absoluteFilePath(desktopFiles.first());
+            return dir.absoluteFilePath(selectMainDesktopFile(dir, desktopFiles));
         }
     }
-    
+
     // Also check without data/ prefix (RPM structure might differ)
     desktopDir = QString("%1/usr/share/applications").arg(extractDir);
     dir.setPath(desktopDir);
     if (dir.exists()) {
         QStringList desktopFiles = dir.entryList({"*.desktop"}, QDir::Files);
         if (!desktopFiles.isEmpty()) {
-            return dir.absoluteFilePath(desktopFiles.first());
+            return dir.absoluteFilePath(selectMainDesktopFile(dir, desktopFiles));
         }
     }
-    
+
     return QString();
 }
 
@@ -632,12 +639,49 @@ QString RpmParser::parseDesktopFile(const QString& desktopPath, PackageMetadata&
     }
     
     file.close();
-    
-    // Parse exec command similar to DebParser
-    if (!execCommand.isEmpty()) {
+
+    // Determine the package data root the same way DebParser does: everything
+    // up to (and including) the "/data/" extraction prefix.
+    QString dataDir;
+    int dataPos = desktopPath.indexOf("/data/");
+    if (dataPos >= 0) {
+        dataDir = desktopPath.left(dataPos + 5);
+    }
+    if (dataDir.isEmpty()) {
+        dataDir = QFileInfo(desktopPath).absolutePath();
+    }
+
+    // If Exec contains java or jar, it's a Java application
+    if (execCommand.contains("java") || execCommand.contains(".jar")) {
+        QRegularExpression jarRegex(R"(([^\s]+\.jar))");
+        QRegularExpressionMatch match = jarRegex.match(execCommand);
+        if (match.hasMatch()) {
+            QString jarPath = match.captured(1);
+            if (jarPath.startsWith("/")) {
+                QString fullJarPath = QString("%1%2").arg(dataDir).arg(jarPath);
+                if (QFileInfo::exists(fullJarPath)) {
+                    metadata.mainExecutable = fullJarPath;
+                    metadata.executables.append(fullJarPath);
+                }
+            } else {
+                QStringList searchPaths = {
+                    QString("%1/usr/games/%2").arg(dataDir).arg(jarPath),
+                    QString("%1/opt/%2").arg(dataDir).arg(jarPath),
+                    QString("%1/usr/lib/%2").arg(dataDir).arg(jarPath),
+                    QString("%1/usr/share/%2").arg(dataDir).arg(jarPath)
+                };
+                for (const QString& path : searchPaths) {
+                    if (QFileInfo::exists(path)) {
+                        metadata.mainExecutable = path;
+                        metadata.executables.append(path);
+                        break;
+                    }
+                }
+            }
+        }
+    } else if (!execCommand.isEmpty()) {
         QString execPath = execCommand.split(' ').first();
         if (execPath.startsWith("/")) {
-            QString dataDir = QString("%1/data").arg(QFileInfo(desktopPath).absolutePath().section('/', 0, -3));
             QString fullPath = QString("%1%2").arg(dataDir).arg(execPath);
             if (QFileInfo::exists(fullPath)) {
                 metadata.mainExecutable = fullPath;
@@ -655,10 +699,50 @@ QString RpmParser::parseDesktopFile(const QString& desktopPath, PackageMetadata&
                     }
                 }
             }
+        } else {
+            // Bare command name: search in PATH-like locations inside the package
+            QStringList searchPaths = {
+                QString("%1/usr/bin/%2").arg(dataDir).arg(execPath),
+                QString("%1/usr/sbin/%2").arg(dataDir).arg(execPath),
+                QString("%1/bin/%2").arg(dataDir).arg(execPath),
+                QString("%1/usr/share/%2").arg(dataDir).arg(execPath)
+            };
+            for (const QString& path : searchPaths) {
+                if (QFileInfo::exists(path)) {
+                    metadata.mainExecutable = path;
+                    metadata.executables.append(path);
+                    break;
+                }
+            }
         }
     }
-    
-    return QString();
+
+    // Resolve Icon= to an actual file inside the package
+    if (!iconName.isEmpty() && metadata.iconPath.isEmpty()) {
+        QStringList iconPaths = {
+            QString("%1/usr/share/pixmaps/%2").arg(dataDir).arg(iconName),
+            QString("%1/usr/share/icons/%2").arg(dataDir).arg(iconName),
+            QString("%1/usr/share/icons/hicolor/256x256/apps/%2").arg(dataDir).arg(iconName),
+            QString("%1/usr/share/icons/hicolor/128x128/apps/%2").arg(dataDir).arg(iconName)
+        };
+        for (const QString& path : iconPaths) {
+            if (QFileInfo::exists(path)) {
+                metadata.iconPath = path;
+                break;
+            }
+            // Icon= is usually given without an extension; try common ones
+            for (const QString& ext : {"png", "svg", "xpm", "ico"}) {
+                QString pathWithExt = QString("%1.%2").arg(path).arg(ext);
+                if (QFileInfo::exists(pathWithExt)) {
+                    metadata.iconPath = pathWithExt;
+                    break;
+                }
+            }
+            if (!metadata.iconPath.isEmpty()) break;
+        }
+    }
+
+    return execCommand;
 }
 
 QStringList RpmParser::searchInDirectory(const QString& dir, const QStringList& patterns, bool executableOnly) {
@@ -670,8 +754,12 @@ QStringList RpmParser::searchInDirectory(const QString& dir, const QStringList& 
     }
     
     for (const QString& pattern : patterns) {
-        QFileInfoList entries = dirObj.entryInfoList({pattern}, QDir::Files | QDir::Executable, QDir::Name);
-        
+        QFileInfoList entries = dirObj.entryInfoList(
+            {pattern},
+            QDir::Files | (executableOnly ? QDir::Executable : QDir::Files),
+            QDir::Name
+        );
+
         for (const QFileInfo& info : entries) {
             if (executableOnly && !info.isExecutable()) {
                 continue;

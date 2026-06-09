@@ -35,6 +35,7 @@ public:
 
 private:
     PackageMetadata extractRpmMetadata(const QString& packagePath, const QString& extractedDir) const;
+    QStringList extractRpmDependencies(const QString& packagePath) const;
 
     DebParser* m_debParser;
     RpmParser* m_rpmParser;
