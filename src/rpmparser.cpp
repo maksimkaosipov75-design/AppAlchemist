@@ -575,25 +575,25 @@ QString RpmParser::findIcon(const QString& extractDir) {
 QString RpmParser::findDesktopFile(const QString& extractDir) {
     QString dataDir = QString("%1/data").arg(extractDir);
     QString desktopDir = QString("%1/usr/share/applications").arg(dataDir);
-    
+
     QDir dir(desktopDir);
     if (dir.exists()) {
         QStringList desktopFiles = dir.entryList({"*.desktop"}, QDir::Files);
         if (!desktopFiles.isEmpty()) {
-            return dir.absoluteFilePath(desktopFiles.first());
+            return dir.absoluteFilePath(selectMainDesktopFile(dir, desktopFiles));
         }
     }
-    
+
     // Also check without data/ prefix (RPM structure might differ)
     desktopDir = QString("%1/usr/share/applications").arg(extractDir);
     dir.setPath(desktopDir);
     if (dir.exists()) {
         QStringList desktopFiles = dir.entryList({"*.desktop"}, QDir::Files);
         if (!desktopFiles.isEmpty()) {
-            return dir.absoluteFilePath(desktopFiles.first());
+            return dir.absoluteFilePath(selectMainDesktopFile(dir, desktopFiles));
         }
     }
-    
+
     return QString();
 }
 
