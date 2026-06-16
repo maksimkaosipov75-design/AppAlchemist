@@ -93,8 +93,18 @@ PackageExtractionResult PackageExtractor::extract(const QString& packagePath,
         break;
     case PackageFormat::Rpm:
         if (!m_rpmParser->extractRpm(packagePath, result.extractedDir)) {
+            const RpmHeaderInfo header = RpmParser::readRpmHeader(packagePath);
             result.error = "Failed to extract .rpm package";
             result.logs << "ERROR: Failed to extract .rpm package";
+            if (!header.payloadCompressor.isEmpty()) {
+                result.logs << QString("Payload compression: %1").arg(header.payloadCompressor);
+                if (header.payloadCompressor == "zstd") {
+                    result.logs << "The package uses zstd compression. Ensure libarchive "
+                                   "(with zstd support) or a recent rpm2cpio is available.";
+                }
+            }
+            result.logs << "No usable RPM extractor found. Install libarchive (bsdtar) "
+                           "or rpm2cpio + cpio.";
             return result;
         }
         result.logs << "Successfully extracted .rpm package";
@@ -114,11 +124,29 @@ PackageExtractionResult PackageExtractor::extract(const QString& packagePath,
 PackageMetadata PackageExtractor::extractRpmMetadata(const QString& packagePath, const QString& extractedDir) const {
     PackageMetadata metadata;
 
-    const ProcessResult rpmInfo = SubprocessWrapper::execute("rpm", {
-        "-qp", "--queryformat", "%{NAME}\n%{VERSION}\n%{SUMMARY}\n", packagePath
-    });
+    // Preferred source: parse the RPM header in-process. This requires no
+    // external tools and works on any host distro (DEB has had this parity all
+    // along via its control file).
+    const RpmHeaderInfo header = RpmParser::readRpmHeader(packagePath);
+    if (header.valid) {
+        metadata.package = header.name;
+        metadata.version = header.version;
+        if (!header.release.isEmpty()) {
+            metadata.version += "-" + header.release;
+        }
+        metadata.description = header.summary;
+    }
 
-    if (rpmInfo.success && !rpmInfo.stdoutOutput.isEmpty()) {
+    // Fallback 1: the rpm binary, if the header could not be parsed.
+    const ProcessResult rpmInfo = header.valid
+        ? ProcessResult{false, -1, {}, {}, {}}
+        : SubprocessWrapper::execute("rpm", {
+              "-qp", "--queryformat", "%{NAME}\n%{VERSION}\n%{SUMMARY}\n", packagePath
+          });
+
+    if (header.valid) {
+        // Header already populated name/version/description above.
+    } else if (rpmInfo.success && !rpmInfo.stdoutOutput.isEmpty()) {
         const QStringList lines = rpmInfo.stdoutOutput.trimmed().split('\n');
         if (lines.size() >= 2) {
             metadata.package = lines[0].trimmed();
@@ -210,21 +238,29 @@ PackageMetadata PackageExtractor::extractRpmMetadata(const QString& packagePath,
 }
 
 QStringList PackageExtractor::extractRpmDependencies(const QString& packagePath) const {
-    QStringList depends;
-
-    const ProcessResult rpmReqs = SubprocessWrapper::execute("rpm", {"-qpR", packagePath});
-    if (!rpmReqs.success || rpmReqs.stdoutOutput.isEmpty()) {
-        return depends;
+    // Prefer the in-process header (no external rpm needed); fall back to
+    // `rpm -qpR` only if the header could not be parsed.
+    const RpmHeaderInfo header = RpmParser::readRpmHeader(packagePath);
+    QStringList rawRequires;
+    if (header.valid && !header.requires_.isEmpty()) {
+        rawRequires = header.requires_;
+    } else {
+        const ProcessResult rpmReqs = SubprocessWrapper::execute("rpm", {"-qpR", packagePath});
+        if (!rpmReqs.success || rpmReqs.stdoutOutput.isEmpty()) {
+            return {};
+        }
+        rawRequires = rpmReqs.stdoutOutput.split('\n', Qt::SkipEmptyParts);
     }
 
-    const QStringList lines = rpmReqs.stdoutOutput.split('\n', Qt::SkipEmptyParts);
-    for (const QString& rawLine : lines) {
+    QStringList depends;
+    for (const QString& rawLine : rawRequires) {
         QString dep = rawLine.trimmed();
         if (dep.isEmpty()) {
             continue;
         }
 
-        // Skip internal/synthetic requirements that are not packages
+        // Skip internal/synthetic requirements and file-path dependencies that
+        // are not installable packages or resolvable sonames.
         if (dep.startsWith("rpmlib(") ||
             dep.startsWith("config(") ||
             dep.startsWith("rtld(") ||
@@ -232,12 +268,28 @@ QStringList PackageExtractor::extractRpmDependencies(const QString& packagePath)
             continue;
         }
 
-        // Strip version constraints: "libfoo >= 1.2" -> "libfoo"
+        // Strip version constraints expressed inline: "libfoo >= 1.2" -> "libfoo".
         const int spacePos = dep.indexOf(' ');
         if (spacePos > 0) {
             dep = dep.left(spacePos);
         }
 
+        // Strip RPM capability suffixes so soname requirements become real
+        // sonames that ldd-based resolution can match:
+        //   "libc.so.6()(64bit)"          -> "libc.so.6"
+        //   "libc.so.6(GLIBC_2.34)(64bit)" -> "libc.so.6"
+        //   "pkgconfig(foo)"               -> dropped (not a package/soname)
+        const int parenPos = dep.indexOf('(');
+        if (parenPos >= 0) {
+            const QString prefix = dep.left(parenPos);
+            if (prefix.contains(".so")) {
+                dep = prefix;  // soname capability
+            } else {
+                continue;      // pkgconfig()/perl()/cmake() style capabilities
+            }
+        }
+
+        dep = dep.trimmed();
         if (!dep.isEmpty() && !depends.contains(dep)) {
             depends.append(dep);
         }

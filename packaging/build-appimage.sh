@@ -51,11 +51,35 @@ if [ ! -x "$APPDIR/usr/bin/appalchemist" ]; then
     exit 1
 fi
 
-# Copy appimagetool if available
+# Bundle appimagetool INTO the AppImage so conversions work on user machines
+# that do not have appimagetool installed. This must download it when missing
+# (previously it was only copied if a local thirdparty/appimagetool already
+# existed, so released AppImages silently shipped without it).
+mkdir -p "$PROJECT_DIR/thirdparty"
+APPIMAGETOOL_SRC=""
 if [ -f "$PROJECT_DIR/thirdparty/appimagetool" ]; then
-    echo "Copying bundled appimagetool..."
-    cp "$PROJECT_DIR/thirdparty/appimagetool" "$APPDIR/usr/lib/appalchemist/appimagetool"
+    APPIMAGETOOL_SRC="$PROJECT_DIR/thirdparty/appimagetool"
+elif [ -f "$PROJECT_DIR/thirdparty/appimagetool-${ARCH_NAME}.AppImage" ]; then
+    APPIMAGETOOL_SRC="$PROJECT_DIR/thirdparty/appimagetool-${ARCH_NAME}.AppImage"
+else
+    echo "Downloading appimagetool for ${ARCH_NAME}..."
+    if wget -q --show-progress \
+        "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${ARCH_NAME}.AppImage" \
+        -O "$PROJECT_DIR/thirdparty/appimagetool-${ARCH_NAME}.AppImage"; then
+        chmod +x "$PROJECT_DIR/thirdparty/appimagetool-${ARCH_NAME}.AppImage"
+        APPIMAGETOOL_SRC="$PROJECT_DIR/thirdparty/appimagetool-${ARCH_NAME}.AppImage"
+    else
+        echo "WARNING: Failed to download appimagetool; it will NOT be bundled."
+    fi
+fi
+
+if [ -n "$APPIMAGETOOL_SRC" ]; then
+    echo "Bundling appimagetool into AppImage from: $APPIMAGETOOL_SRC"
+    cp "$APPIMAGETOOL_SRC" "$APPDIR/usr/lib/appalchemist/appimagetool"
     chmod +x "$APPDIR/usr/lib/appalchemist/appimagetool"
+else
+    echo "WARNING: appimagetool was NOT bundled into the AppImage. Conversions will"
+    echo "         require a system appimagetool on the end-user machine."
 fi
 
 # Copy desktop file

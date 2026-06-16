@@ -11,6 +11,7 @@ Build-Depends: debhelper (>= 13),
                libqt6sql6,
                libgtk-4-dev,
                libadwaita-1-dev,
+               libarchive-dev,
                pkg-config
 Standards-Version: 4.6.0
 Homepage: https://github.com/maksimkaosipov75-design/AppAlchemist

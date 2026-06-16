@@ -6,10 +6,10 @@ pkgdesc="Convert .deb, .rpm and Linux archives into portable AppImage bundles"
 arch=('x86_64')
 url="https://github.com/maksimkaosipov75-design/AppAlchemist"
 license=('MIT')
-depends=('qt6-base' 'gtk4' 'libadwaita')
+depends=('qt6-base' 'gtk4' 'libadwaita' 'libarchive')
 optdepends=('appimagetool: Required for building AppImages'
             'libnotify: For system notifications')
-makedepends=('cmake' 'qt6-base' 'qt6-tools' 'pkgconf')
+makedepends=('cmake' 'qt6-base' 'qt6-tools' 'pkgconf' 'libarchive')
 source=("${pkgname}-${pkgver}.tar.gz")
 sha256sums=('SKIP')
 

@@ -12,9 +12,11 @@ BuildRequires:  gcc-c++
 BuildRequires:  gtk4-devel
 BuildRequires:  libadwaita-devel
 BuildRequires:  pkgconf-pkg-config
+BuildRequires:  libarchive-devel
 Requires:       qt6-qtbase
 Requires:       gtk4
 Requires:       libadwaita
+Requires:       libarchive
 
 %description
 AppAlchemist converts Linux application packages and archives into
