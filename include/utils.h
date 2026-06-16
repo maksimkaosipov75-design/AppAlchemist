@@ -56,4 +56,11 @@ QString detectSystemArchitecture();
 QString extractDesktopExecBinary(const QString& execCommand);
 QString resolveExecutableFromCommand(const QString& execCommand, const QStringList& executables);
 
+// Normalize raw RPM RPMTAG_REQUIRENAME / `rpm -qpR` entries into resolvable
+// dependency tokens: strips version constraints and capability suffixes so
+// sonames survive ("libc.so.6()(64bit)" -> "libc.so.6"), drops synthetic
+// requirements (rpmlib()/config()/rtld()/pkgconfig()/file paths), and
+// de-duplicates. Exposed here so it can be unit-tested in isolation.
+QStringList normalizeRpmRequires(const QStringList& rawRequires);
+
 #endif // UTILS_H

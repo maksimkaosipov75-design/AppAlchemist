@@ -517,6 +517,53 @@ QString resolveExecutableFromCommand(const QString& execCommand, const QStringLi
     return QString();
 }
 
+QStringList normalizeRpmRequires(const QStringList& rawRequires) {
+    QStringList depends;
+    for (const QString& rawLine : rawRequires) {
+        QString dep = rawLine.trimmed();
+        if (dep.isEmpty()) {
+            continue;
+        }
+
+        // Skip internal/synthetic requirements and file-path dependencies that
+        // are not installable packages or resolvable sonames.
+        if (dep.startsWith("rpmlib(") ||
+            dep.startsWith("config(") ||
+            dep.startsWith("rtld(") ||
+            dep.startsWith("/")) {
+            continue;
+        }
+
+        // Strip version constraints expressed inline: "libfoo >= 1.2" -> "libfoo".
+        const int spacePos = dep.indexOf(' ');
+        if (spacePos > 0) {
+            dep = dep.left(spacePos);
+        }
+
+        // Strip RPM capability suffixes so soname requirements become real
+        // sonames that ldd-based resolution can match:
+        //   "libc.so.6()(64bit)"           -> "libc.so.6"
+        //   "libc.so.6(GLIBC_2.34)(64bit)" -> "libc.so.6"
+        //   "pkgconfig(foo)"               -> dropped (not a package/soname)
+        const int parenPos = dep.indexOf('(');
+        if (parenPos >= 0) {
+            const QString prefix = dep.left(parenPos);
+            if (prefix.contains(".so")) {
+                dep = prefix;  // soname capability
+            } else {
+                continue;      // pkgconfig()/perl()/cmake() style capabilities
+            }
+        }
+
+        dep = dep.trimmed();
+        if (!dep.isEmpty() && !depends.contains(dep)) {
+            depends.append(dep);
+        }
+    }
+
+    return depends;
+}
+
 ProcessResult SubprocessWrapper::executeWithSudo(const QString& command,
                                                   const QStringList& arguments,
                                                   const QString& password,
