@@ -129,6 +129,7 @@ Requirements:
 - C++20 compiler
 - Qt6 Core, Network, Xml and Sql development packages
 - GTK4 and libadwaita development packages
+- libarchive development package (for in-process RPM/archive extraction)
 - `pkg-config`
 - standard packaging utilities available on your distro
 

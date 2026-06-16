@@ -83,6 +83,21 @@ target_compile_definitions(appalchemist_backend
         APPALCHEMIST_COMPATIBILITY_RULES_PATH="${CMAKE_CURRENT_SOURCE_DIR}/assets/compatibility_rules.json"
 )
 
+# libarchive lets us unpack RPM (and its gzip/xz/lzma/bzip2/zstd payloads)
+# entirely in-process, removing the runtime dependency on rpm2cpio/cpio/bsdtar.
+# Optional: if it is not found the code falls back to external tools.
+if(PkgConfig_FOUND)
+    pkg_check_modules(LIBARCHIVE IMPORTED_TARGET libarchive)
+endif()
+
+if(LIBARCHIVE_FOUND)
+    target_link_libraries(appalchemist_backend PUBLIC PkgConfig::LIBARCHIVE)
+    target_compile_definitions(appalchemist_backend PRIVATE HAVE_LIBARCHIVE)
+    message(STATUS "libarchive found: in-process RPM extraction enabled")
+else()
+    message(WARNING "libarchive not found: RPM extraction will rely on external tools (bsdtar/rpm2cpio)")
+endif()
+
 if(PkgConfig_FOUND)
     pkg_check_modules(GTK_FRONTEND IMPORTED_TARGET gtk4 libadwaita-1)
 endif()

@@ -40,13 +40,30 @@
       "optional": true,
       "source": {
         "kind": "external-package",
-        "acquire": "Store one small CLI .rpm package locally and point this entry at the downloaded file."
+        "acquire": "Download a small CLI RPM, e.g. Fedora 'hello': curl -fSL -o hello.rpm https://kojipkgs.fedoraproject.org/packages/hello/2.12.1/6.fc42/x86_64/hello-2.12.1-6.fc42.x86_64.rpm"
       },
       "expected": {
         "format": "rpm",
         "profile": "native-cli",
         "plan_mode": "fast-path-preferred",
-        "should_build_appimage": true
+        "should_build_appimage": true,
+        "notes": "zstd-compressed payload (modern Fedora). Exercises in-process libarchive extraction and header-based metadata, both of which must work without the rpm/rpm2cpio binaries installed."
+      }
+    },
+    {
+      "id": "native-cli-rpm-xz",
+      "enabled": false,
+      "optional": true,
+      "source": {
+        "kind": "external-package",
+        "acquire": "Download an older xz-compressed RPM, e.g. a CentOS 7 / EL7 package, to cover non-zstd payloads."
+      },
+      "expected": {
+        "format": "rpm",
+        "profile": "native-cli",
+        "plan_mode": "fast-path-preferred",
+        "should_build_appimage": true,
+        "notes": "xz/lzma-compressed payload. Confirms extraction parity across RPM payload compressors."
       }
     },
     {

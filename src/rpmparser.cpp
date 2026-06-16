@@ -11,6 +11,219 @@
 #include <QDateTime>
 #include <QIODevice>
 
+#ifdef HAVE_LIBARCHIVE
+#include <archive.h>
+#include <archive_entry.h>
+#endif
+
+namespace {
+
+quint32 readBigEndian32(const uchar* p) {
+    return (quint32(p[0]) << 24) | (quint32(p[1]) << 16) | (quint32(p[2]) << 8) | quint32(p[3]);
+}
+
+// Read a single RPM header section (signature header or main header).
+// Header layout: 16-byte intro (3-byte magic 0x8e 0xad 0xe8, 1-byte version,
+// 4 reserved, 4 nindex BE, 4 store-size BE), then nindex*16 index entries,
+// then the data store. The signature header is padded to an 8-byte boundary.
+bool readRpmHeaderSection(QFile& f, QByteArray& index, QByteArray& store, bool padToEight) {
+    const QByteArray intro = f.read(16);
+    if (intro.size() != 16) {
+        return false;
+    }
+    const uchar* p = reinterpret_cast<const uchar*>(intro.constData());
+    if (!(p[0] == 0x8e && p[1] == 0xad && p[2] == 0xe8)) {
+        return false;
+    }
+    const quint32 nindex = readBigEndian32(p + 8);
+    const quint32 storeSize = readBigEndian32(p + 12);
+    // Sanity bounds: RPM headers are small; reject absurd values to avoid huge reads.
+    if (nindex > 100000u || storeSize > 256u * 1024u * 1024u) {
+        return false;
+    }
+    const qint64 indexBytes = qint64(nindex) * 16;
+    index = f.read(indexBytes);
+    store = f.read(storeSize);
+    if (index.size() != indexBytes || store.size() != qint64(storeSize)) {
+        return false;
+    }
+    if (padToEight) {
+        const qint64 total = 16 + indexBytes + qint64(storeSize);
+        const qint64 rem = total % 8;
+        if (rem != 0) {
+            f.seek(f.pos() + (8 - rem));
+        }
+    }
+    return true;
+}
+
+QString rpmStoreString(const QByteArray& store, quint32 offset) {
+    if (offset >= quint32(store.size())) {
+        return QString();
+    }
+    const char* base = store.constData() + offset;
+    const int maxLen = store.size() - offset;
+    const int len = qstrnlen(base, maxLen);
+    return QString::fromUtf8(base, len);
+}
+
+QStringList rpmStoreStringArray(const QByteArray& store, quint32 offset, quint32 count) {
+    QStringList out;
+    quint32 cur = offset;
+    for (quint32 i = 0; i < count && cur < quint32(store.size()); ++i) {
+        const char* base = store.constData() + cur;
+        const int maxLen = store.size() - cur;
+        const int len = qstrnlen(base, maxLen);
+        out << QString::fromUtf8(base, len);
+        cur += len + 1;
+    }
+    return out;
+}
+
+// Returns true if the directory tree contains at least one regular file.
+// Used to reject extractions that produced only empty directories.
+bool directoryHasRegularFile(const QString& path) {
+    QDirIterator it(path, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+    return it.hasNext();
+}
+
+#ifdef HAVE_LIBARCHIVE
+// Extract an RPM (or any libarchive-supported package) entirely in-process.
+// Handles the RPM container plus gzip/xz/lzma/bzip2/zstd payload compression
+// without depending on rpm2cpio, cpio, bsdtar or the rpm binary being present.
+bool extractWithLibarchive(const QString& archivePath, const QString& destDir) {
+    struct archive* a = archive_read_new();
+    archive_read_support_filter_all(a);
+    archive_read_support_format_all(a);
+
+    struct archive* ext = archive_write_disk_new();
+    archive_write_disk_set_options(ext,
+        ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM |
+        ARCHIVE_EXTRACT_SECURE_NODOTDOT | ARCHIVE_EXTRACT_SECURE_SYMLINKS);
+    archive_write_disk_set_standard_lookup(ext);
+
+    if (archive_read_open_filename(a, archivePath.toUtf8().constData(), 65536) != ARCHIVE_OK) {
+        qWarning() << "libarchive open failed:" << archive_error_string(a);
+        archive_read_free(a);
+        archive_write_free(ext);
+        return false;
+    }
+
+    QDir().mkpath(destDir);
+
+    auto relocate = [&destDir](QString p) -> QString {
+        if (p.startsWith("./")) {
+            p = p.mid(2);
+        } else if (p.startsWith('/')) {
+            p = p.mid(1);
+        }
+        return destDir + "/" + p;
+    };
+
+    int fileCount = 0;
+    bool readError = false;
+    struct archive_entry* entry = nullptr;
+    int r;
+    while ((r = archive_read_next_header(a, &entry)) == ARCHIVE_OK) {
+        const QString original = QString::fromUtf8(archive_entry_pathname(entry));
+        if (original.isEmpty() || original == "." || original == "./") {
+            continue;
+        }
+        archive_entry_set_pathname(entry, relocate(original).toUtf8().constData());
+
+        if (const char* hl = archive_entry_hardlink(entry)) {
+            archive_entry_set_hardlink(entry,
+                relocate(QString::fromUtf8(hl)).toUtf8().constData());
+        }
+
+        r = archive_write_header(ext, entry);
+        if (r == ARCHIVE_OK && archive_entry_size(entry) > 0) {
+            const void* buff = nullptr;
+            size_t size = 0;
+            la_int64_t offset = 0;
+            while ((r = archive_read_data_block(a, &buff, &size, &offset)) == ARCHIVE_OK) {
+                if (archive_write_data_block(ext, buff, size, offset) != ARCHIVE_OK) {
+                    qWarning() << "libarchive write failed:" << archive_error_string(ext);
+                    break;
+                }
+            }
+            if (r != ARCHIVE_EOF && r != ARCHIVE_OK) {
+                readError = true;
+            }
+        }
+        archive_write_finish_entry(ext);
+        if (archive_entry_filetype(entry) == AE_IFREG) {
+            ++fileCount;
+        }
+    }
+
+    if (r != ARCHIVE_EOF) {
+        qWarning() << "libarchive extraction error:" << archive_error_string(a);
+        readError = true;
+    }
+
+    archive_read_close(a);
+    archive_read_free(a);
+    archive_write_close(ext);
+    archive_write_free(ext);
+
+    return !readError && fileCount > 0;
+}
+#endif // HAVE_LIBARCHIVE
+
+} // namespace
+
+RpmHeaderInfo RpmParser::readRpmHeader(const QString& rpmPath) {
+    RpmHeaderInfo info;
+    QFile f(rpmPath);
+    if (!f.open(QIODevice::ReadOnly)) {
+        return info;
+    }
+
+    // Lead: 96 bytes, must start with the RPM magic.
+    const QByteArray lead = f.read(96);
+    if (lead.size() != 96) {
+        return info;
+    }
+    const uchar* lp = reinterpret_cast<const uchar*>(lead.constData());
+    if (!(lp[0] == 0xed && lp[1] == 0xab && lp[2] == 0xee && lp[3] == 0xdb)) {
+        return info;
+    }
+
+    // Signature header is padded to 8 bytes; skip over it to reach the main header.
+    QByteArray sigIndex, sigStore;
+    if (!readRpmHeaderSection(f, sigIndex, sigStore, /*padToEight=*/true)) {
+        return info;
+    }
+
+    QByteArray index, store;
+    if (!readRpmHeaderSection(f, index, store, /*padToEight=*/false)) {
+        return info;
+    }
+
+    const int n = index.size() / 16;
+    const uchar* ip = reinterpret_cast<const uchar*>(index.constData());
+    for (int i = 0; i < n; ++i) {
+        const uchar* e = ip + i * 16;
+        const quint32 tag = readBigEndian32(e);
+        const quint32 offset = readBigEndian32(e + 8);
+        const quint32 count = readBigEndian32(e + 12);
+        switch (tag) {
+        case 1000: info.name = rpmStoreString(store, offset); break;             // RPMTAG_NAME
+        case 1001: info.version = rpmStoreString(store, offset); break;          // RPMTAG_VERSION
+        case 1002: info.release = rpmStoreString(store, offset); break;          // RPMTAG_RELEASE
+        case 1004: info.summary = rpmStoreString(store, offset); break;          // RPMTAG_SUMMARY (I18N: C locale first)
+        case 1049: info.requires_ = rpmStoreStringArray(store, offset, count); break; // RPMTAG_REQUIRENAME
+        case 1124: info.payloadFormat = rpmStoreString(store, offset); break;    // RPMTAG_PAYLOADFORMAT
+        case 1125: info.payloadCompressor = rpmStoreString(store, offset); break;// RPMTAG_PAYLOADCOMPRESSOR
+        default: break;
+        }
+    }
+
+    info.valid = !info.name.isEmpty();
+    return info;
+}
+
 RpmParser::RpmParser() {
     QString tempBase = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
     m_tempDir = QString("%1/appalchemist-rpm-%2").arg(tempBase).arg(QString::number(QDateTime::currentMSecsSinceEpoch()));
@@ -61,136 +274,93 @@ bool RpmParser::extractRpm(const QString& rpmPath, const QString& extractDir) {
     if (!validateRpmFile(rpmPath)) {
         return false;
     }
-    
-    // Create extraction directory
+
     if (!SubprocessWrapper::createDirectory(extractDir)) {
         return false;
     }
-    
-    // Extract RPM using rpm2cpio and cpio
-    // First, try to use rpm2cpio if available
-    QString cpioDir = QString("%1/cpio").arg(extractDir);
-    if (!SubprocessWrapper::createDirectory(cpioDir)) {
-        return false;
-    }
-    
-    // Check if rpm2cpio is available
-    ProcessResult checkRpm2cpio = SubprocessWrapper::execute("which", {"rpm2cpio"});
-    bool hasRpm2cpio = checkRpm2cpio.success && !checkRpm2cpio.stdoutOutput.trimmed().isEmpty();
-    
-    // Check if cpio is available
-    ProcessResult checkCpio = SubprocessWrapper::execute("which", {"cpio"});
-    bool hasCpio = checkCpio.success && !checkCpio.stdoutOutput.trimmed().isEmpty();
-    
-    QString extractPath = QString("%1/data").arg(extractDir);
+
+    const QString extractPath = QString("%1/data").arg(extractDir);
     if (!SubprocessWrapper::createDirectory(extractPath)) {
         return false;
     }
-    
-    if (hasRpm2cpio && hasCpio) {
-        // Pipe rpm2cpio output into cpio directly (no shell, no quoting issues)
-        ProcessResult cpioResult = SubprocessWrapper::executePipeline(
+
+    // Read the header up-front so we can give actionable diagnostics about the
+    // payload compressor if every extraction method fails.
+    const RpmHeaderInfo header = readRpmHeader(rpmPath);
+    const QString compressor = header.payloadCompressor.isEmpty() ? QStringLiteral("unknown")
+                                                                  : header.payloadCompressor;
+
+    auto succeeded = [&]() {
+        if (directoryHasRegularFile(extractPath)) {
+            return true;
+        }
+        // Wipe any empty-directory skeleton a failed attempt left behind so the
+        // next method starts clean.
+        SubprocessWrapper::removeDirectory(extractPath);
+        SubprocessWrapper::createDirectory(extractPath);
+        return false;
+    };
+
+    auto toolAvailable = [](const QString& tool) {
+        const ProcessResult check = SubprocessWrapper::execute("which", {tool});
+        return check.success && !check.stdoutOutput.trimmed().isEmpty();
+    };
+
+    // Method 1: libarchive, in-process. Handles the RPM container and every
+    // common payload compressor (gzip/xz/lzma/bzip2/zstd) with no external
+    // tools, so it works on any host distro and inside our own AppImage.
+#ifdef HAVE_LIBARCHIVE
+    if (extractWithLibarchive(rpmPath, extractPath) && succeeded()) {
+        qDebug() << "RPM extracted via libarchive";
+        return true;
+    }
+    qWarning() << "libarchive extraction did not yield files, trying external tools";
+#endif
+
+    // Method 2: bsdtar (libarchive CLI). Also reads the RPM container directly
+    // and supports the same set of compressors in a single command.
+    if (toolAvailable("bsdtar")) {
+        const ProcessResult bsdtarResult = SubprocessWrapper::execute(
+            "bsdtar", {"-xf", rpmPath, "-C", extractPath}, {}, 300000);
+        if (succeeded()) {
+            qDebug() << "RPM extracted via bsdtar";
+            return true;
+        }
+        qWarning() << "bsdtar extraction failed:" << bsdtarResult.stderrOutput.left(200);
+    }
+
+    // Method 3: rpm2cpio | cpio. The classic path; depends on both tools and on
+    // rpm2cpio understanding the payload compressor.
+    if (toolAvailable("rpm2cpio") && toolAvailable("cpio")) {
+        const ProcessResult cpioResult = SubprocessWrapper::executePipeline(
             "rpm2cpio", {rpmPath},
             "cpio", {"-idm", "--quiet"},
             extractPath,
-            300000  // large packages can take a while to unpack
-        );
+            300000);
+        if (succeeded()) {
+            qDebug() << "RPM extracted via rpm2cpio | cpio";
+            return true;
+        }
+        qWarning() << "rpm2cpio | cpio extraction failed:" << cpioResult.stderrOutput.left(200);
+    }
 
-        // Check if extraction was successful by looking for extracted files
-        QDir extractPathDir(extractPath);
-        bool hasFiles = extractPathDir.exists() && 
-                       (!extractPathDir.entryList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot).isEmpty());
-        
-        // Also check if we got a .cpio file (wrong extraction)
-        QStringList files = extractPathDir.entryList(QDir::Files, QDir::Name);
-        bool hasCpioFile = false;
-        for (const QString& file : files) {
-            if (file.endsWith(".cpio", Qt::CaseInsensitive)) {
-                hasCpioFile = true;
-                qWarning() << "WARNING: Found .cpio file instead of extracted contents:" << file;
-                break;
-            }
-        }
-        
-        if (hasCpioFile || (!cpioResult.success && !hasFiles)) {
-            qWarning() << "cpio extraction failed or produced .cpio file";
-            qWarning() << "cpio stdout:" << cpioResult.stdoutOutput;
-            qWarning() << "cpio stderr:" << cpioResult.stderrOutput;
-            // Try alternative: use bsdtar if available (some RPMs can be extracted with it)
-            ProcessResult bsdtarCheck = SubprocessWrapper::execute("which", {"bsdtar"});
-            if (bsdtarCheck.success && !bsdtarCheck.stdoutOutput.trimmed().isEmpty()) {
-                qWarning() << "Trying bsdtar as fallback...";
-                // Clean up failed extraction
-                SubprocessWrapper::removeDirectory(extractPath);
-                SubprocessWrapper::createDirectory(extractPath);
-                ProcessResult bsdtarResult = SubprocessWrapper::execute("bsdtar", {
-                    "-xf", rpmPath, "-C", extractPath
-                });
-                if (bsdtarResult.success) {
-                    QDir newExtractPathDir(extractPath);
-                    if (!newExtractPathDir.entryList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot).isEmpty()) {
-                        qWarning() << "bsdtar extraction successful";
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }
-        
-        // Log extraction result for debugging
-        if (extractPathDir.exists()) {
-            QStringList entries = extractPathDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
-            qDebug() << "Extracted RPM structure - top level dirs:" << entries;
-        }
-    } else {
-        // Fallback: try using bsdtar (available on Arch Linux and can extract RPMs)
-        ProcessResult bsdtarCheck = SubprocessWrapper::execute("which", {"bsdtar"});
-        if (bsdtarCheck.success && !bsdtarCheck.stdoutOutput.trimmed().isEmpty()) {
-            qWarning() << "rpm2cpio not found, trying bsdtar...";
-            ProcessResult bsdtarResult = SubprocessWrapper::execute("bsdtar", {
-                "-xf", rpmPath, "-C", extractPath
-            });
-            if (bsdtarResult.success) {
-                QDir extractPathDir(extractPath);
-                QStringList entries = extractPathDir.entryList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
-                if (!entries.isEmpty()) {
-                    qWarning() << "bsdtar extraction successful, found" << entries.size() << "entries";
-                    return true;
-                }
-            }
-            qWarning() << "bsdtar extraction failed:" << bsdtarResult.errorMessage;
-        }
-        
-        // Try using rpm command directly (if available)
-        ProcessResult rpmResult = SubprocessWrapper::execute("rpm", {
-            "--query", "--package", "--list", rpmPath
-        });
-        
-        if (!rpmResult.success) {
-            // Last resort: try using 7z or unzip (some RPMs can be extracted this way)
-            ProcessResult sevenZipResult = SubprocessWrapper::execute("7z", {
-                "x", rpmPath, "-o" + extractPath
-            });
-            
-            if (!sevenZipResult.success) {
-                qWarning() << "ERROR: Cannot extract RPM. Please install rpmextract package (contains rpm2cpio)";
-                qWarning() << "  On Arch Linux: sudo pacman -S rpmextract";
-                return false;
-            }
-        } else {
-            // Use rpm to extract
-            ProcessResult extractResult = SubprocessWrapper::execute("rpm", {
-                "--install", "--root", extractPath, "--nodeps", "--notriggers", "--noscripts", rpmPath
-            }, extractPath);
-            
-            if (!extractResult.success) {
-                qWarning() << "RPM extraction failed:" << extractResult.errorMessage;
-                return false;
-            }
+    // Method 4: 7z, which can unpack some RPMs.
+    if (toolAvailable("7z")) {
+        SubprocessWrapper::execute("7z", {"x", "-y", rpmPath, "-o" + extractPath}, {}, 300000);
+        if (succeeded()) {
+            qDebug() << "RPM extracted via 7z";
+            return true;
         }
     }
-    
-    return true;
+
+    qWarning() << "ERROR: Could not extract RPM" << rpmPath;
+    qWarning() << "  Payload compressor reported by header:" << compressor;
+    if (compressor == "zstd") {
+        qWarning() << "  The payload is zstd-compressed; rebuild with a zstd-capable"
+                      " libarchive, or install a recent rpm2cpio.";
+    }
+    qWarning() << "  Install one of: libarchive (bsdtar), rpm2cpio + cpio.";
+    return false;
 }
 
 PackageMetadata RpmParser::parseMetadata(const QString& extractDir, const QString& packageName) {
