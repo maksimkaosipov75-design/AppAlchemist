@@ -38,6 +38,7 @@ set(APPALCHEMIST_BACKEND_SOURCES
     src/compatibility_rules.cpp
     src/runtime_probe.cpp
     src/utils.cpp
+    src/archive_extractor.cpp
     src/cache_manager.cpp
 )
 
@@ -62,6 +63,7 @@ set(APPALCHEMIST_BACKEND_HEADERS
     include/compatibility_rules.h
     include/runtime_probe.h
     include/utils.h
+    include/archive_extractor.h
     include/cache_manager.h
 )
 
@@ -184,4 +186,18 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/thirdparty/appimagetool")
         DESTINATION lib/appalchemist
         RENAME appimagetool
     )
+endif()
+
+# Tests. Enable with -DBUILD_TESTING=ON (off by default so normal/AppImage
+# builds are unaffected). Run with `ctest` from the build directory.
+option(BUILD_TESTING "Build unit tests" OFF)
+if(BUILD_TESTING)
+    enable_testing()
+    add_executable(appalchemist_tests tests/backend_tests.cpp)
+    target_link_libraries(appalchemist_tests PRIVATE appalchemist_backend Qt6::Core)
+    if(LIBARCHIVE_FOUND)
+        target_link_libraries(appalchemist_tests PRIVATE PkgConfig::LIBARCHIVE)
+        target_compile_definitions(appalchemist_tests PRIVATE HAVE_LIBARCHIVE)
+    endif()
+    add_test(NAME backend_tests COMMAND appalchemist_tests)
 endif()

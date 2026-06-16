@@ -146,6 +146,20 @@ Run:
 ./build/appalchemist
 ```
 
+## Tests
+
+Unit tests cover the package-parsing and extraction logic (RPM header parsing,
+dependency normalization, and path-traversal protection during extraction):
+
+```bash
+cmake -S . -B build -DBUILD_TESTING=ON
+cmake --build build -j$(nproc)
+ctest --test-dir build --output-on-failure
+```
+
+CI (`.github/workflows/ci.yml`) runs these tests and a real RPM-to-AppImage
+conversion smoke test on every push and pull request.
+
 ## Troubleshooting
 
 ### Conversion Fails

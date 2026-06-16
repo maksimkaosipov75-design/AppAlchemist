@@ -1,5 +1,6 @@
 #include "tarballparser.h"
 #include "utils.h"
+#include "archive_extractor.h"
 #include <QDir>
 #include <QFileInfo>
 #include <QFile>
@@ -128,39 +129,49 @@ bool TarballParser::validateTarball(const QString& tarballPath) {
 }
 
 bool TarballParser::extractTar(const QString& tarPath, const QString& extractDir, const QString& compression) {
-    QStringList args;
-    
-    if (compression == "gz") {
-        args = {"-xzf", tarPath, "-C", extractDir};
-    } else if (compression == "xz") {
-        args = {"-xJf", tarPath, "-C", extractDir};
-    } else if (compression == "bz2") {
-        args = {"-xjf", tarPath, "-C", extractDir};
-    } else if (compression == "zstd") {
-        args = {"--zstd", "-xf", tarPath, "-C", extractDir};
-    } else {
-        args = {"-xf", tarPath, "-C", extractDir};
+    // Prefer bsdtar (libarchive): it auto-detects compression and, unlike GNU
+    // tar, refuses absolute paths and "../" members, so untrusted archives
+    // cannot escape extractDir.
+    ProcessResult bsd = SubprocessWrapper::execute(
+        "bsdtar", {"-x", "--no-same-owner", "-f", tarPath, "-C", extractDir});
+    if (bsd.success) {
+        return true;
     }
-    
+
+    QStringList args;
+    if (compression == "gz") {
+        args = {"--no-same-owner", "-xzf", tarPath, "-C", extractDir};
+    } else if (compression == "xz") {
+        args = {"--no-same-owner", "-xJf", tarPath, "-C", extractDir};
+    } else if (compression == "bz2") {
+        args = {"--no-same-owner", "-xjf", tarPath, "-C", extractDir};
+    } else if (compression == "zstd") {
+        args = {"--no-same-owner", "--zstd", "-xf", tarPath, "-C", extractDir};
+    } else {
+        args = {"--no-same-owner", "-xf", tarPath, "-C", extractDir};
+    }
+
     ProcessResult result = SubprocessWrapper::execute("tar", args);
     return result.success;
 }
 
 bool TarballParser::extractZip(const QString& zipPath, const QString& extractDir) {
-    // Try unzip first
-    ProcessResult result = SubprocessWrapper::execute("unzip", {"-q", "-o", zipPath, "-d", extractDir});
+    // Prefer bsdtar (libarchive): rejects path-traversal entries that a plain
+    // `unzip` would happily write outside extractDir ("zip slip").
+    ProcessResult result = SubprocessWrapper::execute("bsdtar", {"-xf", zipPath, "-C", extractDir});
     if (result.success) {
         return true;
     }
-    
-    // Fallback to 7z
+
+    // Fallback to 7z.
     result = SubprocessWrapper::execute("7z", {"x", "-y", QString("-o%1").arg(extractDir), zipPath});
     if (result.success) {
         return true;
     }
-    
-    // Fallback to bsdtar
-    result = SubprocessWrapper::execute("bsdtar", {"-xf", zipPath, "-C", extractDir});
+
+    // Last resort: unzip. Less safe against crafted archives, so it is only
+    // used when no libarchive-based tool is available.
+    result = SubprocessWrapper::execute("unzip", {"-q", "-o", zipPath, "-d", extractDir});
     return result.success;
 }
 
@@ -178,9 +189,22 @@ bool TarballParser::extractTarball(const QString& tarballPath, const QString& ex
     if (!SubprocessWrapper::createDirectory(dataDir)) {
         return false;
     }
-    
+
     bool success = false;
-    
+
+    // Prefer the shared in-process extractor: libarchive auto-detects the
+    // container (tar/zip) and compressor, and rejects path-traversal entries
+    // ("zip slip"). External tools (tar/unzip) are used only as a fallback.
+    if (ArchiveExtractor::isAvailable()) {
+        QString laError;
+        if (ArchiveExtractor::extractSecure(tarballPath, dataDir, &laError)) {
+            success = true;
+        } else {
+            qWarning() << "Secure extraction failed, falling back to external tools:" << laError;
+        }
+    }
+
+    if (!success)
     switch (m_type) {
         case TarballType::TAR_GZ:
             success = extractTar(tarballPath, dataDir, "gz");

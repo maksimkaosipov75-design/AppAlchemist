@@ -1,5 +1,6 @@
 #include "rpmparser.h"
 #include "utils.h"
+#include "archive_extractor.h"
 #include <QDir>
 #include <QDirIterator>
 #include <QFileInfo>
@@ -10,11 +11,6 @@
 #include <QRegularExpression>
 #include <QDateTime>
 #include <QIODevice>
-
-#ifdef HAVE_LIBARCHIVE
-#include <archive.h>
-#include <archive_entry.h>
-#endif
 
 namespace {
 
@@ -86,90 +82,6 @@ bool directoryHasRegularFile(const QString& path) {
     QDirIterator it(path, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
     return it.hasNext();
 }
-
-#ifdef HAVE_LIBARCHIVE
-// Extract an RPM (or any libarchive-supported package) entirely in-process.
-// Handles the RPM container plus gzip/xz/lzma/bzip2/zstd payload compression
-// without depending on rpm2cpio, cpio, bsdtar or the rpm binary being present.
-bool extractWithLibarchive(const QString& archivePath, const QString& destDir) {
-    struct archive* a = archive_read_new();
-    archive_read_support_filter_all(a);
-    archive_read_support_format_all(a);
-
-    struct archive* ext = archive_write_disk_new();
-    archive_write_disk_set_options(ext,
-        ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM |
-        ARCHIVE_EXTRACT_SECURE_NODOTDOT | ARCHIVE_EXTRACT_SECURE_SYMLINKS);
-    archive_write_disk_set_standard_lookup(ext);
-
-    if (archive_read_open_filename(a, archivePath.toUtf8().constData(), 65536) != ARCHIVE_OK) {
-        qWarning() << "libarchive open failed:" << archive_error_string(a);
-        archive_read_free(a);
-        archive_write_free(ext);
-        return false;
-    }
-
-    QDir().mkpath(destDir);
-
-    auto relocate = [&destDir](QString p) -> QString {
-        if (p.startsWith("./")) {
-            p = p.mid(2);
-        } else if (p.startsWith('/')) {
-            p = p.mid(1);
-        }
-        return destDir + "/" + p;
-    };
-
-    int fileCount = 0;
-    bool readError = false;
-    struct archive_entry* entry = nullptr;
-    int r;
-    while ((r = archive_read_next_header(a, &entry)) == ARCHIVE_OK) {
-        const QString original = QString::fromUtf8(archive_entry_pathname(entry));
-        if (original.isEmpty() || original == "." || original == "./") {
-            continue;
-        }
-        archive_entry_set_pathname(entry, relocate(original).toUtf8().constData());
-
-        if (const char* hl = archive_entry_hardlink(entry)) {
-            archive_entry_set_hardlink(entry,
-                relocate(QString::fromUtf8(hl)).toUtf8().constData());
-        }
-
-        r = archive_write_header(ext, entry);
-        if (r == ARCHIVE_OK && archive_entry_size(entry) > 0) {
-            const void* buff = nullptr;
-            size_t size = 0;
-            la_int64_t offset = 0;
-            while ((r = archive_read_data_block(a, &buff, &size, &offset)) == ARCHIVE_OK) {
-                if (archive_write_data_block(ext, buff, size, offset) != ARCHIVE_OK) {
-                    qWarning() << "libarchive write failed:" << archive_error_string(ext);
-                    break;
-                }
-            }
-            if (r != ARCHIVE_EOF && r != ARCHIVE_OK) {
-                readError = true;
-            }
-        }
-        archive_write_finish_entry(ext);
-        if (archive_entry_filetype(entry) == AE_IFREG) {
-            ++fileCount;
-        }
-    }
-
-    if (r != ARCHIVE_EOF) {
-        qWarning() << "libarchive extraction error:" << archive_error_string(a);
-        readError = true;
-    }
-
-    archive_read_close(a);
-    archive_read_free(a);
-    archive_write_close(ext);
-    archive_write_free(ext);
-
-    return !readError && fileCount > 0;
-}
-#endif // HAVE_LIBARCHIVE
 
 } // namespace
 
@@ -308,14 +220,16 @@ bool RpmParser::extractRpm(const QString& rpmPath, const QString& extractDir) {
 
     // Method 1: libarchive, in-process. Handles the RPM container and every
     // common payload compressor (gzip/xz/lzma/bzip2/zstd) with no external
-    // tools, so it works on any host distro and inside our own AppImage.
-#ifdef HAVE_LIBARCHIVE
-    if (extractWithLibarchive(rpmPath, extractPath) && succeeded()) {
-        qDebug() << "RPM extracted via libarchive";
-        return true;
+    // tools, so it works on any host distro and inside our own AppImage. The
+    // shared secure extractor also rejects path-traversal entries.
+    if (ArchiveExtractor::isAvailable()) {
+        QString laError;
+        if (ArchiveExtractor::extractSecure(rpmPath, extractPath, &laError) && succeeded()) {
+            qDebug() << "RPM extracted via libarchive";
+            return true;
+        }
+        qWarning() << "libarchive extraction did not yield files, trying external tools:" << laError;
     }
-    qWarning() << "libarchive extraction did not yield files, trying external tools";
-#endif
 
     // Method 2: bsdtar (libarchive CLI). Also reads the RPM container directly
     // and supports the same set of compressors in a single command.

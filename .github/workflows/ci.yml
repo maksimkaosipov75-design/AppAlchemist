@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, "claude/**" ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkg-config \
+            qt6-base-dev qt6-base-dev-tools \
+            libgtk-4-dev libadwaita-1-dev \
+            libarchive-dev
+
+      - name: Configure (with tests)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Run unit tests
+        run: ctest --test-dir build --output-on-failure
+
+  rpm-conversion-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkg-config \
+            qt6-base-dev qt6-base-dev-tools \
+            libgtk-4-dev libadwaita-1-dev \
+            libarchive-dev wget file xvfb
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j"$(nproc)"
+
+      - name: Download a real (zstd-compressed) RPM
+        run: |
+          wget -q -O hello.rpm \
+            "https://kojipkgs.fedoraproject.org/packages/hello/2.12.1/6.fc42/x86_64/hello-2.12.1-6.fc42.x86_64.rpm"
+
+      - name: Convert RPM to AppImage (no rpm/rpm2cpio installed)
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          # Ensures in-process libarchive extraction + header parsing work
+          # without the rpm toolchain present on the host.
+          xvfb-run -a ./build/appalchemist --convert ./hello.rpm --output ./dist --no-launch
+          ls -la ./dist
+          test -n "$(find ./dist -maxdepth 1 -iname '*.AppImage' -print -quit)"
