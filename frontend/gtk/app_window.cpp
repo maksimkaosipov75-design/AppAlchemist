@@ -928,7 +928,10 @@ void AppWindow::requestSecret(const std::string& title,
     adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(dialog), "confirm", ADW_RESPONSE_SUGGESTED);
     adw_alert_dialog_set_default_response(ADW_ALERT_DIALOG(dialog), "confirm");
     adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dialog), "skip");
+#if ADW_CHECK_VERSION(1, 6, 0)
+    // Only available since libadwaita 1.6; false is the default anyway.
     adw_alert_dialog_set_prefer_wide_layout(ADW_ALERT_DIALOG(dialog), false);
+#endif
 
     auto* root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
     gtk_widget_add_css_class(root, "secret-dialog-box");

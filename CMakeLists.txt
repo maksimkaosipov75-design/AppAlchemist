@@ -99,7 +99,7 @@ else()
 endif()
 
 if(PkgConfig_FOUND)
-    pkg_check_modules(GTK_FRONTEND IMPORTED_TARGET gtk4 libadwaita-1)
+    pkg_check_modules(GTK_FRONTEND IMPORTED_TARGET gtk4>=4.10 libadwaita-1>=1.5)
 endif()
 
 if(GTK_FRONTEND_FOUND)
@@ -131,7 +131,7 @@ if(GTK_FRONTEND_FOUND)
             Qt6::Core
     )
 else()
-    message(FATAL_ERROR "GTK4/libadwaita frontend is required for this build")
+    message(FATAL_ERROR "GTK4 >= 4.10 and libadwaita >= 1.5 are required for this build")
 endif()
 
 # Install
