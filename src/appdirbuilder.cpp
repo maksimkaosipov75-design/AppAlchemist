@@ -1420,6 +1420,53 @@ bool AppDirBuilder::copyIcon(const QString& appDirPath, const QString& iconPath,
     return true;
 }
 
+void AppDirBuilder::writeRuntimeModuleEnvironment(QTextStream& out, const QString& appDirPath) {
+    const QDir appDir(appDirPath);
+
+    if (QDir(appDir.absoluteFilePath("usr/lib/gio/modules")).exists()) {
+        out << "export GIO_MODULE_DIR=\"${HERE}/usr/lib/gio/modules\"\n";
+    }
+
+    if (QDir(appDir.absoluteFilePath("usr/share/glib-2.0/schemas")).exists()) {
+        out << "export GSETTINGS_SCHEMA_DIR=\"${HERE}/usr/share/glib-2.0/schemas:${GSETTINGS_SCHEMA_DIR}\"\n";
+    }
+
+    if (QDir(appDir.absoluteFilePath("usr/lib/girepository-1.0")).exists()) {
+        out << "export GI_TYPELIB_PATH=\"${HERE}/usr/lib/girepository-1.0:${GI_TYPELIB_PATH}\"\n";
+    }
+
+    const QString loadersDir = "usr/lib/gdk-pixbuf-2.0/2.10.0/loaders";
+    if (QDir(appDir.absoluteFilePath(loadersDir)).exists()) {
+        out << "export GDK_PIXBUF_MODULEDIR=\"${HERE}/" << loadersDir << "\"\n";
+
+        // The cache stores absolute paths, so expand the @APPDIR@ placeholder
+        // into a per-user cache file at startup.
+        if (QFileInfo::exists(appDir.absoluteFilePath(loadersDir + "/../loaders.cache.in")) ||
+            QFileInfo::exists(appDir.absoluteFilePath("usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache.in"))) {
+            out << "GDK_PIXBUF_RUNTIME_CACHE=\"${XDG_CACHE_HOME:-${HOME}/.cache}/appalchemist/$(basename \"${HERE}\")-gdk-pixbuf.cache\"\n";
+            out << "mkdir -p \"$(dirname \"${GDK_PIXBUF_RUNTIME_CACHE}\")\" 2>/dev/null || true\n";
+            out << "sed \"s|@APPDIR@|${HERE}|g\" \"${HERE}/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache.in\" "
+                << "> \"${GDK_PIXBUF_RUNTIME_CACHE}\" 2>/dev/null || true\n";
+            out << "if [ -s \"${GDK_PIXBUF_RUNTIME_CACHE}\" ]; then\n";
+            out << "    export GDK_PIXBUF_MODULE_FILE=\"${GDK_PIXBUF_RUNTIME_CACHE}\"\n";
+            out << "fi\n";
+        }
+    }
+
+    for (const QString& gtkVersion : {QStringLiteral("gtk-3.0/3.0.0"), QStringLiteral("gtk-4.0/4.0.0")}) {
+        const QString immodules = QString("usr/lib/%1/immodules").arg(gtkVersion);
+        if (QDir(appDir.absoluteFilePath(immodules)).exists()) {
+            out << "export GTK_IM_MODULE_DIR=\"${HERE}/" << immodules << "\"\n";
+        }
+        const QString printbackends = QString("usr/lib/%1/printbackends").arg(gtkVersion);
+        if (QDir(appDir.absoluteFilePath(printbackends)).exists()) {
+            out << "export GTK_PATH=\"${HERE}/usr/lib/" << gtkVersion << "${GTK_PATH:+:${GTK_PATH}}\"\n";
+        }
+    }
+
+    out << "\n";
+}
+
 bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadata& metadata) {
     QString appRunPath = QString("%1/AppRun").arg(appDirPath);
     
@@ -1464,6 +1511,11 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
     QStringList pathDirs = {"usr/bin", "usr/sbin", "usr/games"};
     QString arch = detectSystemArchitecture();
     QStringList libDirs = {"usr/lib"};
+    
+    // Bundled 32-bit libraries, when the package ships 32-bit binaries.
+    if (QDir(QString("%1/usr/lib32").arg(appDirPath)).exists()) {
+        libDirs << "usr/lib32";
+    }
     
     // Add architecture-specific lib directory
     if (arch == "aarch64") {
@@ -1511,6 +1563,11 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
     out << "export XDG_DATA_DIRS=\"${HERE}/usr/share:${XDG_DATA_DIRS}\"\n";
     out << "export XDG_CONFIG_DIRS=\"${HERE}/etc/xdg:${XDG_CONFIG_DIRS}\"\n";
     out << "\n";
+
+    // Point the bundled GLib/GTK stack at its own loadable modules. Without
+    // this a bundled libgio/libgdk_pixbuf searches the host prefix and either
+    // finds nothing or loads modules built against different library versions.
+    writeRuntimeModuleEnvironment(out, appDirPath);
     
     // Set application-specific environment variables
     for (const QString& envVar : appInfo.envVars) {

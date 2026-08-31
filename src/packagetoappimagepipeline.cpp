@@ -265,6 +265,12 @@ bool PackageToAppImagePipeline::executeFastPath() {
         return false;
     }
 
+    bundleAppDirLibraries("Fast path");
+
+    if (m_cancelled) {
+        return false;
+    }
+
     if (!optimizeBuiltAppDir("Fast path")) {
         return false;
     }
@@ -309,13 +315,25 @@ bool PackageToAppImagePipeline::executeRepairPath() {
         return false;
     }
 
-    if (!m_dependencySettings.enabled) {
-        emit log("Repair path requires dependency resolution to be enabled. Deferring to legacy fallback.");
+    bundleAppDirLibraries("Repair path");
+
+    if (m_cancelled) {
         return false;
     }
 
-    if (!resolveAppDirDependencies(mainExec, "Repair path", true)) {
+    if (m_dependencySettings.enabled &&
+        !resolveAppDirDependencies(mainExec, "Repair path", true)) {
         return false;
+    }
+
+    if (!m_dependencySettings.enabled) {
+        const QStringList remaining = findMissingRuntimeLibraries(mainExec);
+        if (!remaining.isEmpty() && remaining != QStringList{"__ldd_failed__"}) {
+            emit log(QString("Repair path still sees unresolved runtime libraries: %1. "
+                             "Enable repository dependency resolution to fetch them.")
+                     .arg(remaining.join(", ")));
+            return false;
+        }
     }
 
     if (m_cancelled) {
@@ -366,6 +384,12 @@ bool PackageToAppImagePipeline::executeFallbackPath() {
     }
 
     const QString mainExec = findPrimaryAppDirExecutable();
+
+    bundleAppDirLibraries("Fallback path");
+
+    if (m_cancelled) {
+        return false;
+    }
 
     if (m_dependencySettings.enabled) {
         if (mainExec.isEmpty() || !QFileInfo::exists(mainExec)) {
@@ -443,6 +467,29 @@ bool PackageToAppImagePipeline::verifyAppDirReadiness(const QString& executableP
 
     emit const_cast<PackageToAppImagePipeline*>(this)->log("AppDir verification passed.");
     return true;
+}
+
+void PackageToAppImagePipeline::bundleAppDirLibraries(const QString& stageLabel) {
+    if (!m_dependencySettings.bundleSystemLibraries) {
+        emit log(QString("%1 skipped library bundling (disabled in settings).").arg(stageLabel));
+        return;
+    }
+
+    emit progress(62, "Bundling shared libraries...");
+    m_dependencyResolver->setSettings(m_dependencySettings);
+
+    const LibraryBundleReport report = m_dependencyResolver->bundleSystemLibraries(m_appDirPath);
+    emit log(QString("%1 library bundling: %2").arg(stageLabel, report.summary()));
+
+    if (report.ran && !report.bundled.isEmpty()) {
+        // AppRun was written while building the AppDir, before the bundled
+        // GLib/GTK module trees existed. Regenerate it so it exports
+        // GIO_MODULE_DIR, GDK_PIXBUF_MODULE_FILE and friends.
+        if (!m_appDirBuilder->createAppRun(m_appDirPath, m_metadata)) {
+            emit log(QString("WARNING: %1 could not refresh AppRun after bundling libraries.")
+                     .arg(stageLabel));
+        }
+    }
 }
 
 bool PackageToAppImagePipeline::resolveAppDirDependencies(const QString& executablePath,

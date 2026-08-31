@@ -6,6 +6,9 @@
 #include <QTextStream>
 #include <QRegularExpression>
 #include <QStandardPaths>
+#include <QDirIterator>
+#include <QQueue>
+#include <QDebug>
 #include <QEventLoop>
 #include <QTimer>
 #include <QMap>
@@ -15,6 +18,7 @@ DependencyResolver::DependencyResolver(QObject* parent)
     , m_browser(new RepositoryBrowser(this))
 {
     initializeExcludePatterns();
+    initializeSonameExcludePatterns();
     
     connect(m_browser, &RepositoryBrowser::log, this, &DependencyResolver::log);
 }
@@ -44,20 +48,17 @@ void DependencyResolver::initializeExcludePatterns() {
         // D-Bus and system services
         "libdbus", "libsystemd", "libudev", "libpolkit",
         
-        // GLib and GTK base (usually system-provided)
-        "libglib-2.0", "libgobject-2.0", "libgio-2.0",
-        
-        // Audio (system-specific)
-        "libasound", "libpulse", "pipewire", "libjack",
+        // Audio hardware access: ALSA plugins live outside the AppDir, so a
+        // bundled libasound would look for them in the wrong prefix.
+        "libasound", "pipewire", "libjack",
         
         // Core utilities
         "coreutils", "base-files", "bash", "dash",
         
-        // Font config
+        // Font stack: a bundled fontconfig cannot read the host font cache.
         "libfontconfig", "libfreetype",
         
-        // Network (system-specific)
-        "libssl", "libcrypto", "ca-certificates",
+        "ca-certificates",
         
         // Kernel modules
         "linux-image", "linux-headers"
@@ -69,9 +70,531 @@ void DependencyResolver::initializeExcludePatterns() {
     }
 }
 
+void DependencyResolver::initializeSonameExcludePatterns() {
+    // Matched as a prefix against the lowercased soname reported by ldd.
+    // Everything NOT listed here gets copied into the AppDir, which is the
+    // opposite of the old behaviour (bundle nothing unless ldd said "not
+    // found") and is what makes the result runnable on a foreign system.
+    m_sonameExcludePatterns = {
+        // glibc and the dynamic loader must come from the host kernel/libc pair
+        "ld-linux", "ld.so", "libc.so", "libm.so", "libdl.so", "librt.so",
+        "libpthread.so", "libresolv.so", "libnsl.so", "libutil.so",
+        "libcrypt.so", "libanl.so", "libthread_db.so", "libnss_",
+        "linux-vdso", "libmvec.so",
+
+        // GCC/C++ runtime: always present, and mixing versions breaks the ABI
+        "libgcc_s.so", "libstdc++.so", "libgomp.so",
+
+        // Graphics stack: must match the host GPU driver
+        "libgl.so", "libglx.so", "libegl.so", "libgldispatch.so",
+        "libopengl.so", "libglesv1", "libglesv2", "libglapi.so",
+        "libgbm.so", "libdrm.so", "libvulkan.so", "libnvidia", "libcuda.so",
+        "libxcb-dri", "libxcb-glx", "libx11.so", "libx11-xcb.so", "libxext.so",
+
+        // Host session services and security modules
+        "libdbus-1.so", "libsystemd.so", "libudev.so", "libselinux.so",
+        "libapparmor.so", "libcap.so",
+
+        // Font stack: bundled caches are incompatible with the host's
+        "libfontconfig.so", "libfreetype.so",
+
+        // Sound hardware access
+        "libasound.so"
+    };
+}
+
+bool DependencyResolver::shouldExcludeSoname(const QString& soname) const {
+    const QString lowered = QFileInfo(soname).fileName().toLower();
+    if (lowered.isEmpty()) {
+        return true;
+    }
+
+    for (const QString& pattern : m_sonameExcludePatterns) {
+        if (lowered.startsWith(pattern)) {
+            return true;
+        }
+    }
+
+    for (const QString& pattern : m_settings.excludePatterns) {
+        if (!pattern.isEmpty() && lowered.startsWith(pattern.toLower())) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+QString LibraryBundleReport::summary() const {
+    if (!ran) {
+        return QStringLiteral("library bundling skipped");
+    }
+
+    QString text = QString("scanned %1 ELF objects, bundled %2 libraries, left %3 to the host")
+                       .arg(scannedBinaries)
+                       .arg(bundled.size())
+                       .arg(skippedSystemLibraries);
+    if (!unresolved.isEmpty()) {
+        text += QString(", %1 unresolved (%2)")
+                    .arg(unresolved.size())
+                    .arg(unresolved.mid(0, 8).join(", "));
+    }
+    if (!patchelfAvailable) {
+        text += "; patchelf unavailable, relying on LD_LIBRARY_PATH only";
+    }
+    return text;
+}
+
+namespace {
+
+// Reads the ELF identification bytes. Returns 0 when the file is not an ELF
+// object, 32 or 64 for the respective ELF class.
+int elfClassOf(const QString& path) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return 0;
+    }
+
+    char header[5] = {};
+    if (file.read(header, 5) != 5) {
+        return 0;
+    }
+
+    if (header[0] != 0x7f || header[1] != 'E' || header[2] != 'L' || header[3] != 'F') {
+        return 0;
+    }
+
+    return header[4] == 2 ? 64 : 32;
+}
+
+// Parses one ldd output line into (soname, resolved host path).
+// Returns false for lines that carry no dependency (vdso, loader, "statically
+// linked", blank lines).
+bool parseLddLine(const QString& rawLine, QString& soname, QString& resolvedPath, bool& notFound) {
+    const QString line = rawLine.trimmed();
+    soname.clear();
+    resolvedPath.clear();
+    notFound = false;
+
+    if (line.isEmpty() || line.startsWith("statically linked")) {
+        return false;
+    }
+
+    const int arrow = line.indexOf("=>");
+    if (arrow < 0) {
+        // "linux-vdso.so.1 (0x...)" or "/lib64/ld-linux-x86-64.so.2 (0x...)"
+        return false;
+    }
+
+    soname = line.left(arrow).trimmed();
+    QString right = line.mid(arrow + 2).trimmed();
+
+    if (right.startsWith("not found")) {
+        notFound = true;
+        return !soname.isEmpty();
+    }
+
+    // Strip the trailing load address "(0x00007f....)"
+    const int addressStart = right.lastIndexOf(" (0x");
+    if (addressStart > 0) {
+        right = right.left(addressStart).trimmed();
+    }
+
+    resolvedPath = right;
+    return !soname.isEmpty() && !resolvedPath.isEmpty();
+}
+
+// Relative path expressed for an RPATH $ORIGIN entry, e.g. "../lib".
+QString originRelativePath(const QString& fromDir, const QString& toDir) {
+    const QString relative = QDir(fromDir).relativeFilePath(toDir);
+    if (relative.isEmpty() || relative == ".") {
+        return QStringLiteral("$ORIGIN");
+    }
+    return QString("$ORIGIN/%1").arg(relative);
+}
+
+}
+
+namespace {
+
+bool anySonameStartsWith(const QStringList& sonames, const QString& prefix) {
+    for (const QString& soname : sonames) {
+        if (soname.startsWith(prefix, Qt::CaseInsensitive)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Copies a host directory tree into the AppDir and collects any ELF objects it
+// contains, so the caller can bundle their dependencies as well.
+bool copyModuleTree(const QString& sourceDir,
+                    const QString& destinationDir,
+                    QStringList& newElfObjects) {
+    if (!QDir(sourceDir).exists()) {
+        return false;
+    }
+
+    if (!SubprocessWrapper::copyDirectory(sourceDir, destinationDir)) {
+        return false;
+    }
+
+    QDirIterator it(destinationDir, QDir::Files | QDir::NoSymLinks, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString candidate = it.next();
+        if (candidate.endsWith(".so") || candidate.contains(".so.")) {
+            newElfObjects << candidate;
+        }
+    }
+
+    return true;
+}
+
+// First existing match of <dir>/<relative> across the candidate library roots.
+QString findHostDirectory(const QStringList& roots, const QString& relative) {
+    for (const QString& root : roots) {
+        const QString candidate = QDir(root).absoluteFilePath(relative);
+        if (QDir(candidate).exists()) {
+            return candidate;
+        }
+    }
+    return QString();
+}
+
+}
+
+void DependencyResolver::bundleRuntimeModules(const QString& appDirPath,
+                                              const QStringList& bundledSonames,
+                                              const QStringList& hostLibraryDirs,
+                                              QStringList& newElfObjects) {
+    if (bundledSonames.isEmpty()) {
+        return;
+    }
+
+    const QDir appDir(appDirPath);
+    const QString appLibDir = appDir.absoluteFilePath("usr/lib");
+
+    // Candidate host roots: wherever the bundled libraries came from, plus the
+    // usual multiarch and lib64 locations.
+    QStringList roots = hostLibraryDirs;
+    for (const QString& fallback : {QStringLiteral("/usr/lib"),
+                                    QStringLiteral("/usr/lib64"),
+                                    QStringLiteral("/usr/lib/x86_64-linux-gnu"),
+                                    QStringLiteral("/usr/lib/aarch64-linux-gnu")}) {
+        if (!roots.contains(fallback)) {
+            roots << fallback;
+        }
+    }
+
+    // gdk-pixbuf image loaders. The cache file stores absolute paths, so it is
+    // written with an @APPDIR@ placeholder that AppRun expands at startup.
+    if (anySonameStartsWith(bundledSonames, "libgdk_pixbuf-2.0")) {
+        const QString hostLoaders = findHostDirectory(roots, "gdk-pixbuf-2.0/2.10.0/loaders");
+        if (!hostLoaders.isEmpty()) {
+            const QString destination =
+                QDir(appLibDir).absoluteFilePath("gdk-pixbuf-2.0/2.10.0/loaders");
+            if (copyModuleTree(hostLoaders, destination, newElfObjects)) {
+                emit log("  Bundled gdk-pixbuf loaders.");
+
+                const QString cacheTemplate =
+                    QDir(appLibDir).absoluteFilePath("gdk-pixbuf-2.0/2.10.0/loaders.cache.in");
+                const QString queryTool = QStandardPaths::findExecutable("gdk-pixbuf-query-loaders");
+                const QString hostCache = QFileInfo(hostLoaders).absolutePath() + "/loaders.cache";
+
+                QString cacheContent;
+                if (!queryTool.isEmpty()) {
+                    QProcessEnvironment queryEnv = QProcessEnvironment::systemEnvironment();
+                    queryEnv.insert("GDK_PIXBUF_MODULEDIR", destination);
+                    const ProcessResult queryResult =
+                        SubprocessWrapper::execute(queryTool, {}, {}, 30000, queryEnv);
+                    if (queryResult.success) {
+                        cacheContent = queryResult.stdoutOutput;
+                    }
+                }
+
+                if (cacheContent.isEmpty() && QFileInfo::exists(hostCache)) {
+                    QFile hostCacheFile(hostCache);
+                    if (hostCacheFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                        cacheContent = QString::fromUtf8(hostCacheFile.readAll());
+                        hostCacheFile.close();
+                        cacheContent.replace(QFileInfo(hostLoaders).absoluteFilePath(), destination);
+                    }
+                }
+
+                if (!cacheContent.isEmpty()) {
+                    cacheContent.replace(destination, "@APPDIR@/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders");
+                    QFile cacheFile(cacheTemplate);
+                    if (cacheFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                        cacheFile.write(cacheContent.toUtf8());
+                        cacheFile.close();
+                    }
+                }
+            }
+        }
+    }
+
+    // GIO modules (GVFS, TLS backends, ...).
+    if (anySonameStartsWith(bundledSonames, "libgio-2.0")) {
+        const QString hostGio = findHostDirectory(roots, "gio/modules");
+        if (!hostGio.isEmpty() &&
+            copyModuleTree(hostGio, QDir(appLibDir).absoluteFilePath("gio/modules"), newElfObjects)) {
+            emit log("  Bundled GIO modules.");
+        }
+    }
+
+    // GTK input methods and print backends.
+    for (const QString& gtkVersion : {QStringLiteral("gtk-3.0/3.0.0"), QStringLiteral("gtk-4.0/4.0.0")}) {
+        const QString gtkSoname = gtkVersion.startsWith("gtk-3") ? "libgtk-3" : "libgtk-4";
+        if (!anySonameStartsWith(bundledSonames, gtkSoname)) {
+            continue;
+        }
+        for (const QString& subdir : {QStringLiteral("immodules"), QStringLiteral("printbackends")}) {
+            const QString hostDir = findHostDirectory(roots, QString("%1/%2").arg(gtkVersion, subdir));
+            if (hostDir.isEmpty()) {
+                continue;
+            }
+            const QString destination =
+                QDir(appLibDir).absoluteFilePath(QString("%1/%2").arg(gtkVersion, subdir));
+            if (copyModuleTree(hostDir, destination, newElfObjects)) {
+                emit log(QString("  Bundled %1/%2.").arg(gtkVersion, subdir));
+            }
+        }
+    }
+
+    // GSettings schemas: a bundled GIO/GTK refuses to start without them.
+    if (anySonameStartsWith(bundledSonames, "libgio-2.0") ||
+        anySonameStartsWith(bundledSonames, "libgtk-")) {
+        const QString destination = appDir.absoluteFilePath("usr/share/glib-2.0/schemas");
+        if (!QDir(destination).exists() && QDir("/usr/share/glib-2.0/schemas").exists()) {
+            if (SubprocessWrapper::copyDirectory("/usr/share/glib-2.0/schemas", destination)) {
+                const QString compiler = QStandardPaths::findExecutable("glib-compile-schemas");
+                if (!compiler.isEmpty()) {
+                    SubprocessWrapper::execute(compiler, {destination}, {}, 60000);
+                }
+                emit log("  Bundled GSettings schemas.");
+            }
+        }
+    }
+}
+
+LibraryBundleReport DependencyResolver::bundleSystemLibraries(const QString& appDirPath) {
+    LibraryBundleReport report;
+
+    const QDir appDir(appDirPath);
+    if (!appDir.exists()) {
+        emit log("Library bundling skipped: AppDir does not exist.");
+        return report;
+    }
+
+    report.ran = true;
+    emit log("=== Bundling shared libraries into AppDir ===");
+
+    const QString canonicalAppDir = QFileInfo(appDirPath).canonicalFilePath();
+    const QString lib64Dir = appDir.absoluteFilePath("usr/lib");
+    const QString lib32Dir = appDir.absoluteFilePath("usr/lib32");
+    QDir().mkpath(lib64Dir);
+
+    // ldd must see the libraries we already placed in the AppDir, otherwise it
+    // reports them as host libraries and we copy them a second time.
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    QStringList ldPath = {lib64Dir, lib32Dir};
+    const QString existingLdPath = env.value("LD_LIBRARY_PATH");
+    if (!existingLdPath.isEmpty()) {
+        ldPath << existingLdPath;
+    }
+    env.insert("LD_LIBRARY_PATH", ldPath.join(":"));
+
+    report.patchelfAvailable = !QStandardPaths::findExecutable("patchelf").isEmpty();
+    if (!report.patchelfAvailable) {
+        emit log("  patchelf not found: RPATHs will not be rewritten (AppRun still sets LD_LIBRARY_PATH).");
+    }
+
+    // Seed the work list with every ELF object already inside the AppDir.
+    QQueue<QString> pending;
+    QSet<QString> queued;
+    QDirIterator it(appDirPath, QDir::Files | QDir::NoSymLinks, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString candidate = it.next();
+        if (elfClassOf(candidate) == 0) {
+            continue;
+        }
+        if (!queued.contains(candidate)) {
+            queued.insert(candidate);
+            pending.enqueue(candidate);
+        }
+    }
+
+    if (pending.isEmpty()) {
+        emit log("  No ELF objects found in AppDir; nothing to bundle.");
+        return report;
+    }
+
+    QSet<QString> handledSonames;
+    QSet<QString> skippedSonames;
+    QSet<QString> unresolvedSonames;
+    QStringList bundledPaths;
+    QSet<QString> hostLibraryDirs;
+
+    // Pass 0 walks the dependency graph of the packaged binaries. Between the
+    // passes we pull in the loadable-module trees of whatever got bundled, and
+    // pass 1 resolves the dependencies of those modules.
+    for (int pass = 0; pass < 2; ++pass) {
+        // Breadth-first over the dependency graph: newly copied libraries are fed
+        // back in so their own dependencies are bundled too.
+        while (!pending.isEmpty()) {
+            const QString binary = pending.dequeue();
+            report.scannedBinaries++;
+
+            const ProcessResult lddResult =
+                SubprocessWrapper::execute("ldd", {binary}, {}, 30000, env);
+            if (!lddResult.success && lddResult.stdoutOutput.isEmpty()) {
+                continue;
+            }
+
+            const QStringList lines = lddResult.stdoutOutput.split('\n');
+            for (const QString& line : lines) {
+                QString soname;
+                QString hostPath;
+                bool notFound = false;
+                if (!parseLddLine(line, soname, hostPath, notFound)) {
+                    continue;
+                }
+
+                if (shouldExcludeSoname(soname)) {
+                    if (!skippedSonames.contains(soname)) {
+                        skippedSonames.insert(soname);
+                        report.skippedSystemLibraries++;
+                    }
+                    continue;
+                }
+
+                if (notFound) {
+                    unresolvedSonames.insert(soname);
+                    continue;
+                }
+
+                const QString canonicalHostPath = QFileInfo(hostPath).canonicalFilePath();
+                if (canonicalHostPath.isEmpty()) {
+                    unresolvedSonames.insert(soname);
+                    continue;
+                }
+
+                // Already provided from inside the AppDir.
+                if (!canonicalAppDir.isEmpty() && canonicalHostPath.startsWith(canonicalAppDir + "/")) {
+                    continue;
+                }
+
+                if (handledSonames.contains(soname)) {
+                    continue;
+                }
+                handledSonames.insert(soname);
+
+                const int elfClass = elfClassOf(canonicalHostPath);
+                const QString targetDir = (elfClass == 32) ? lib32Dir : lib64Dir;
+                QDir().mkpath(targetDir);
+
+                const QString destination = QDir(targetDir).absoluteFilePath(QFileInfo(soname).fileName());
+                if (QFileInfo::exists(destination)) {
+                    continue;
+                }
+
+                if (!QFile::copy(canonicalHostPath, destination)) {
+                    emit log(QString("  WARNING: failed to copy %1 from %2").arg(soname, canonicalHostPath));
+                    unresolvedSonames.insert(soname);
+                    continue;
+                }
+
+                QFile::setPermissions(destination,
+                                      QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner |
+                                      QFile::ReadGroup | QFile::ExeGroup |
+                                      QFile::ReadOther | QFile::ExeOther);
+
+                report.bundled << soname;
+                bundledPaths << destination;
+                hostLibraryDirs.insert(QFileInfo(canonicalHostPath).absolutePath());
+
+                if (!queued.contains(destination)) {
+                    queued.insert(destination);
+                    pending.enqueue(destination);
+                }
+            }
+        }
+
+        if (pass == 0) {
+            QStringList moduleObjects;
+            QStringList searchDirs = hostLibraryDirs.values();
+            searchDirs.sort();
+            bundleRuntimeModules(appDirPath, report.bundled, searchDirs, moduleObjects);
+            for (const QString& moduleObject : moduleObjects) {
+                if (!queued.contains(moduleObject)) {
+                    queued.insert(moduleObject);
+                    pending.enqueue(moduleObject);
+                }
+            }
+        }
+    }
+
+    report.unresolved = unresolvedSonames.values();
+    report.unresolved.sort();
+    report.bundled.sort();
+
+    // Point every ELF object at the bundled library directory. RPATH entries
+    // are appended, never replaced: packages under /opt often ship an $ORIGIN
+    // based RPATH that is required for their own private libraries.
+    if (report.patchelfAvailable) {
+        for (const QString& binary : queued) {
+            const QString binaryDir = QFileInfo(binary).absolutePath();
+            QStringList wanted = {originRelativePath(binaryDir, lib64Dir)};
+            if (QDir(lib32Dir).exists()) {
+                wanted << originRelativePath(binaryDir, lib32Dir);
+            }
+
+            const ProcessResult current =
+                SubprocessWrapper::execute("patchelf", {"--print-rpath", binary}, {}, 10000);
+            QStringList entries;
+            if (current.success) {
+                const QString existing = current.stdoutOutput.trimmed();
+                if (!existing.isEmpty()) {
+                    entries = existing.split(':', Qt::SkipEmptyParts);
+                }
+            }
+
+            bool changed = false;
+            for (const QString& entry : wanted) {
+                if (!entries.contains(entry)) {
+                    entries << entry;
+                    changed = true;
+                }
+            }
+
+            if (!changed) {
+                continue;
+            }
+
+            const ProcessResult setResult = SubprocessWrapper::execute(
+                "patchelf", {"--set-rpath", entries.join(":"), binary}, {}, 15000);
+            if (!setResult.success) {
+                // Non-fatal: LD_LIBRARY_PATH from AppRun still covers the lookup.
+                qDebug() << "patchelf --set-rpath failed for" << binary
+                         << setResult.stderrOutput.left(200);
+            }
+        }
+    }
+
+    m_resolvedLibraries.append(bundledPaths);
+
+    emit log(QString("  %1").arg(report.summary()));
+    if (!report.unresolved.isEmpty()) {
+        emit log(QString("  WARNING: unresolved sonames: %1").arg(report.unresolved.join(", ")));
+    }
+    emit log("=== Library bundling finished ===");
+
+    return report;
+}
+
 void DependencyResolver::setSettings(const DependencySettings& settings) {
     m_settings = settings;
     initializeExcludePatterns();
+    initializeSonameExcludePatterns();
 }
 
 bool DependencyResolver::shouldExclude(const QString& name) {

@@ -55,6 +55,10 @@ private:
     void logConversionPlan();
     bool verifyAppDirReadiness(const QString& executablePath, bool requireDesktopEntry) const;
     bool resolveAppDirDependencies(const QString& executablePath, const QString& stageLabel, bool requiredForSuccess);
+    // Copies the host shared libraries the AppDir links against into the AppDir
+    // so the produced AppImage does not depend on host packages. Runs on every
+    // conversion path.
+    void bundleAppDirLibraries(const QString& stageLabel);
     bool optimizeBuiltAppDir(const QString& stageLabel);
     bool packageBuiltAppDir(const QString& stageLabel);
     bool runRuntimeProbe(const QString& executablePath, const QString& stageLabel, bool requiredForSuccess);
