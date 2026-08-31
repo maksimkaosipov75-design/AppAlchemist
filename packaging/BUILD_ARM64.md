@@ -8,9 +8,9 @@ On your ARM64 system (Asahi Linux), ensure you have:
 
 ```bash
 # Install build dependencies
-sudo pacman -S base-devel cmake qt6-base qt6-tools wget
+sudo pacman -S base-devel cmake qt6-base gtk4 libadwaita wget
 # Or on Debian/Ubuntu:
-# sudo apt-get install build-essential cmake qt6-base-dev qt6-base-dev-tools wget
+# sudo apt-get install build-essential cmake qt6-base-dev libgtk-4-dev libadwaita-1-dev wget
 ```
 
 ## Building
