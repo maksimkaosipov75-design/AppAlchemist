@@ -66,14 +66,37 @@ void AppImageBuilder::preloadAppImageTool() {
 QString AppImageBuilder::getBundledAppImageToolPath() {
     // Check for bundled appimagetool in application directory
     QString appDir = QCoreApplication::applicationDirPath();
-    QString bundledPath = QString("%1/usr/bin/appimagetool").arg(appDir);
-    if (QFileInfo::exists(bundledPath) && checkAppImageTool(bundledPath)) {
-        return bundledPath;
+
+    // When running inside an AppImage, applicationDirPath() = <mount>/usr/bin
+    // so we need to go up to the AppDir root (<mount>) first.
+    // When running from a normal build/install, applicationDirPath() = <prefix>/bin
+    // and the lib path is relative to that.
+    QDir appDirObj(appDir);
+
+    // Candidate paths relative to the binary directory
+    QStringList candidates = {
+        QString("%1/appimagetool").arg(appDir),
+        QString("%1/usr/bin/appimagetool").arg(appDir),
+        QString("%1/usr/lib/appalchemist/appimagetool").arg(appDir),
+    };
+
+    // Also try from the AppDir root (one or two levels up from usr/bin)
+    if (appDirObj.dirName() == "bin") {
+        appDirObj.cdUp(); // -> <mount> or <prefix>
+        candidates.append(QString("%1/usr/lib/appalchemist/appimagetool").arg(appDirObj.absolutePath()));
+        candidates.append(QString("%1/lib/appalchemist/appimagetool").arg(appDirObj.absolutePath()));
+        if (appDirObj.dirName() == "usr") {
+            appDirObj.cdUp(); // -> <mount> or <prefix>
+            candidates.append(QString("%1/usr/lib/appalchemist/appimagetool").arg(appDirObj.absolutePath()));
+            candidates.append(QString("%1/lib/appalchemist/appimagetool").arg(appDirObj.absolutePath()));
+        }
     }
-    // Also check in usr/lib/appalchemist/appimagetool
-    bundledPath = QString("%1/usr/lib/appalchemist/appimagetool").arg(appDir);
-    if (QFileInfo::exists(bundledPath) && checkAppImageTool(bundledPath)) {
-        return bundledPath;
+
+    for (const QString& path : candidates) {
+        if (QFileInfo::exists(path)) {
+            qDebug() << "Found bundled appimagetool at:" << path;
+            return path;
+        }
     }
     return QString();
 }
@@ -152,8 +175,26 @@ bool AppImageBuilder::checkAppImageTool(const QString& path) {
     if (!info.exists() || !info.isExecutable()) {
         return false;
     }
-    
-    // Try to run it with --version
+
+    // If the file is an AppImage (identified by the magic bytes "AI\x02" at offset 8),
+    // running --version inside another AppImage often fails due to FUSE/nesting.
+    // Accept it as valid if it exists and is executable — the real build will surface
+    // any actual problems.
+    QFile f(path);
+    if (f.open(QIODevice::ReadOnly)) {
+        // The AppImage type marker lives at offset 8 of the ELF header:
+        // 'A', 'I', then the format version (0x01 for type 1, 0x02 for type 2).
+        char header[12] = {};
+        const qint64 bytesRead = f.read(header, sizeof(header));
+        f.close();
+        if (bytesRead == sizeof(header) &&
+            header[8] == 'A' && header[9] == 'I' &&
+            (header[10] == 0x01 || header[10] == 0x02)) {
+            return true;
+        }
+    }
+
+    // Try to run it with --version for non-AppImage tool binaries
     ProcessResult result = SubprocessWrapper::execute(path, {"--version"}, {}, 5000);
     return result.success;
 }
