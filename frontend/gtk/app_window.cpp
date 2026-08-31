@@ -320,9 +320,12 @@ void AppWindow::buildUi() {
     adw_preferences_group_add(ADW_PREFERENCES_GROUP(settingsGroup), optimizeRow);
 
     auto* depsRow = adw_action_row_new();
-    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(depsRow), "Resolve dependencies");
-    adw_action_row_set_subtitle(ADW_ACTION_ROW(depsRow), "Request missing libraries during packaging when needed.");
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(depsRow), "Download missing dependencies");
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(depsRow),
+                                "Fetch libraries that are absent on this machine from the system repositories. "
+                                "Libraries installed locally are always bundled.");
     m_dependencySwitch = gtk_switch_new();
+    gtk_switch_set_active(GTK_SWITCH(m_dependencySwitch), true);
     adw_action_row_add_suffix(ADW_ACTION_ROW(depsRow), m_dependencySwitch);
     adw_preferences_group_add(ADW_PREFERENCES_GROUP(settingsGroup), depsRow);
 

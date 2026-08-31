@@ -333,6 +333,19 @@ int CliConverter::convert(const QString& packagePath, const QString& outputDir, 
     m_pipeline->setPackagePath(packagePath);
     m_pipeline->setOutputPath(appImagePath);
     
+    // The CLI path is what the .deb/.rpm file handlers invoke, so it must use
+    // the same defaults as the GUI: bundle host libraries into the AppDir, and
+    // strip/compress the result. Repository downloads stay off because this
+    // path is non-interactive and cannot prompt for a sudo password.
+    DependencySettings dependencySettings;
+    dependencySettings.bundleSystemLibraries = true;
+    dependencySettings.enabled = false;
+    m_pipeline->setDependencySettings(dependencySettings);
+    
+    OptimizationSettings optimizationSettings;
+    optimizationSettings.enabled = true;
+    m_pipeline->setOptimizationSettings(optimizationSettings);
+    
     // Start conversion
     m_pipelineThread->start();
     

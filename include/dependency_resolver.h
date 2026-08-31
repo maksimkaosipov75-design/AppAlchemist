@@ -9,11 +9,29 @@
 
 // Dependency resolution settings
 struct DependencySettings {
+    // Copy every shared library the AppDir binaries link against into the
+    // AppDir itself. This is what makes the produced AppImage self-contained,
+    // so it is on by default and should only be turned off for debugging.
+    bool bundleSystemLibraries = true;
+    // Additionally query the host package manager for libraries that are not
+    // installed locally. Needs network/sudo, so it stays opt-in.
     bool enabled = false;
     bool downloadMissing = true;           // Download missing libraries
     bool includeRecommended = false;       // Include recommended packages
     bool excludeSystemLibs = true;         // Skip glibc, libpthread, etc.
     QStringList excludePatterns;           // Additional exclude patterns
+};
+
+// Result of bundling host libraries into an AppDir.
+struct LibraryBundleReport {
+    bool ran = false;                   // Whether bundling was attempted at all
+    bool patchelfAvailable = false;     // Whether RPATHs could be rewritten
+    int scannedBinaries = 0;            // ELF objects inspected
+    int skippedSystemLibraries = 0;     // Deliberately left to the host
+    QStringList bundled;                // Sonames copied into the AppDir
+    QStringList unresolved;             // Sonames ldd could not resolve
+
+    QString summary() const;
 };
 
 // Resolved dependency information
@@ -48,6 +66,13 @@ public:
     
     // Check if a library/package should be excluded
     bool shouldExclude(const QString& name);
+
+    // Check if a concrete soname must stay a host dependency (glibc, GL, ...)
+    bool shouldExcludeSoname(const QString& soname) const;
+
+    // Copy every resolvable shared-library dependency of every ELF object in
+    // the AppDir into the AppDir, transitively, and point RPATHs at it.
+    LibraryBundleReport bundleSystemLibraries(const QString& appDirPath);
     
     // Get libraries to include in AppDir
     QStringList getResolvedLibraries() const { return m_resolvedLibraries; }
@@ -68,10 +93,22 @@ private:
     DependencySettings m_settings;
     QStringList m_resolvedLibraries;
     QSet<QString> m_excludePatterns;
+    QSet<QString> m_sonameExcludePatterns;
     RepositoryBrowser* m_browser;
     QString m_sudoPassword;
     
     void initializeExcludePatterns();
+    void initializeSonameExcludePatterns();
+
+    // Copies the loadable-module trees (gdk-pixbuf loaders, GIO modules, GTK
+    // input methods, GSettings schemas) that belong to libraries we just
+    // bundled. Without them a bundled GTK/GIO stack fails at startup because it
+    // looks for its modules under the host prefix. Newly copied ELF modules are
+    // appended to \a newElfObjects so their own dependencies get bundled too.
+    void bundleRuntimeModules(const QString& appDirPath,
+                              const QStringList& bundledSonames,
+                              const QStringList& hostLibraryDirs,
+                              QStringList& newElfObjects);
     
     // Check if library is available on the system
     QString findSystemLibrary(const QString& libName);
