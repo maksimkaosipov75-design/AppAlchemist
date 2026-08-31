@@ -10,8 +10,6 @@ find_package(Qt6 REQUIRED COMPONENTS Core Network Xml Sql)
 find_package(PkgConfig QUIET)
 
 set(CMAKE_AUTOMOC ON)
-set(CMAKE_AUTOUIC ON)
-set(CMAKE_AUTORCC ON)
 
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
