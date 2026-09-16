@@ -44,8 +44,11 @@ mkdir -p %{buildroot}%{_datadir}/applications
 mkdir -p %{buildroot}%{_datadir}/pixmaps
 mkdir -p %{buildroot}%{_datadir}/icons/hicolor
 
-# Install binary
-install -m 755 build/appalchemist %{buildroot}%{_bindir}/appalchemist
+# Install binaries: the GTK interface, the headless converter, and the
+# historical "appalchemist" command name as a symlink to the interface.
+install -m 755 build/appalchemist-gui %{buildroot}%{_bindir}/appalchemist-gui
+install -m 755 build/appalchemist-cli %{buildroot}%{_bindir}/appalchemist-cli
+ln -sf appalchemist-gui %{buildroot}%{_bindir}/appalchemist
 
 # Install bundled appimagetool if available
 if [ -f ../thirdparty/appimagetool ]; then
@@ -67,6 +70,8 @@ fi
 
 %files
 %{_bindir}/appalchemist
+%{_bindir}/appalchemist-gui
+%{_bindir}/appalchemist-cli
 %{_libdir}/appalchemist/appimagetool
 %{_datadir}/applications/appalchemist.desktop
 %{_datadir}/pixmaps/appalchemist.png

@@ -55,3 +55,6 @@ Thumbs.db
 
 # Agent orchestration workspaces
 .agents/
+
+# Internal request/handoff records kept out of the published repository
+ORIGINAL_REQUEST.md
