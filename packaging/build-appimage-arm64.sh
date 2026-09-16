@@ -34,6 +34,11 @@ mkdir -p "$APPDIR/usr/share/applications"
 mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 mkdir -p "$APPDIR/usr/share/mime/packages"
 
+if [ ! -x "$APPDIR/usr/bin/appalchemist-gui" ]; then
+    echo "ERROR: Freshly built GTK executable not found at $APPDIR/usr/bin/appalchemist-gui"
+    exit 1
+fi
+
 # Download appimagetool for ARM64 if not available
 if [ ! -f "$PROJECT_DIR/thirdparty/appimagetool-aarch64.AppImage" ]; then
     echo "Downloading appimagetool for ARM64..."
@@ -115,7 +120,7 @@ if [ -f "$LINUXDEPLOY" ] && [ -f "$LINUXDEPLOY_PLUGIN_QT" ]; then
     # Ignore errors from strip (they're non-critical)
     "$LINUXDEPLOY" \
         --appdir "$APPDIR" \
-        --executable "$APPDIR/usr/bin/appalchemist" \
+        --executable "$APPDIR/usr/bin/appalchemist-gui" \
         --desktop-file "$APPDIR/appalchemist.desktop" \
         --icon-file "$APPDIR/appalchemist.png" \
         --plugin qt 2>&1 | grep -v "ERROR: Strip call failed" || true
@@ -241,7 +246,14 @@ if [ -d "${HERE}/usr/share/mime/packages" ] && command -v update-mime-database >
     update-mime-database "${HOME}/.local/share/mime" 2>/dev/null || true
 fi
 
-exec "${HERE}/usr/bin/appalchemist" "$@"
+# usr/bin/appalchemist is the installed entry point: it opens the interface
+# when launched with no arguments and runs the headless converter when given a
+# conversion request, which is what the .desktop handlers pass.
+if [ -x "${HERE}/usr/bin/appalchemist" ]; then
+    exec "${HERE}/usr/bin/appalchemist" "$@"
+fi
+
+exec "${HERE}/usr/bin/appalchemist-gui" "$@"
 EOF
 chmod +x "$APPDIR/AppRun"
 

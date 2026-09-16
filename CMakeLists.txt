@@ -210,6 +210,15 @@ if(BUILD_GUI)
 
     install(TARGETS appalchemist-gui RUNTIME DESTINATION bin)
 
+    # "appalchemist" is the product's command name and is what the desktop
+    # entries, MIME handlers and the documentation invoke. The build produces
+    # appalchemist-gui and appalchemist-cli, so install a small dispatcher
+    # under the historical name that forwards to the right one.
+    install(PROGRAMS packaging/appalchemist-dispatch.sh
+        DESTINATION bin
+        RENAME appalchemist
+    )
+
     # Install desktop files
     install(FILES packaging/appalchemist.desktop
         DESTINATION share/applications

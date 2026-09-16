@@ -19,16 +19,55 @@ jobs:
             build-essential cmake pkg-config \
             qt6-base-dev qt6-base-dev-tools \
             libgtk-4-dev libadwaita-1-dev \
-            libarchive-dev
+            libarchive-dev libzstd-dev \
+            patchelf binutils
 
       - name: Configure (with tests)
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=ON
 
       - name: Build
         run: cmake --build build -j"$(nproc)"
 
       - name: Run unit tests
         run: ctest --test-dir build --output-on-failure
+
+      - name: Verify the CLI links against no GUI toolkit
+        run: |
+          ! ldd build/appalchemist-cli | grep -E "libgtk-4|libadwaita|libQt6Gui|libQt6Widgets"
+
+      - name: Install and check the "appalchemist" entry point
+        run: |
+          cmake --install build --prefix "$PWD/stage/usr"
+          test -x stage/usr/bin/appalchemist
+          test -x stage/usr/bin/appalchemist-gui
+          test -x stage/usr/bin/appalchemist-cli
+          # The command name must still answer a conversion request headlessly.
+          stage/usr/bin/appalchemist --version
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkg-config \
+            qt6-base-dev qt6-base-dev-tools \
+            libarchive-dev libzstd-dev \
+            patchelf binutils
+
+      - name: Configure with AddressSanitizer and UndefinedBehaviorSanitizer
+        run: |
+          cmake -S . -B build-asan \
+            -DCMAKE_BUILD_TYPE=Debug -DENABLE_SANITIZERS=ON -DBUILD_GUI=OFF
+
+      - name: Build
+        run: cmake --build build-asan -j"$(nproc)"
+
+      - name: Run test suite under sanitizers
+        run: ctest --test-dir build-asan --output-on-failure
 
   rpm-conversion-smoke:
     runs-on: ubuntu-latest
@@ -41,12 +80,12 @@ jobs:
           sudo apt-get install -y \
             build-essential cmake pkg-config \
             qt6-base-dev qt6-base-dev-tools \
-            libgtk-4-dev libadwaita-1-dev \
-            libarchive-dev wget file xvfb
+            libarchive-dev libzstd-dev \
+            patchelf binutils wget file
 
-      - name: Build
+      - name: Build the headless converter
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=OFF -DENABLE_TESTS=OFF
           cmake --build build -j"$(nproc)"
 
       - name: Download a real (zstd-compressed) RPM
@@ -59,7 +98,25 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: "1"
         run: |
           # Ensures in-process libarchive extraction + header parsing work
-          # without the rpm toolchain present on the host.
-          xvfb-run -a ./build/appalchemist --convert ./hello.rpm --output ./dist --no-launch
+          # without the rpm toolchain present on the host. The headless CLI
+          # needs no display, so no xvfb wrapper.
+          ./build/appalchemist-cli --convert ./hello.rpm --output ./dist --no-launch
           ls -la ./dist
           test -n "$(find ./dist -maxdepth 1 -iname '*.AppImage' -print -quit)"
+
+      - name: Converted AppImage must not ship broken library symlinks
+        run: |
+          APPIMAGE="$(find ./dist -maxdepth 1 -iname '*.AppImage' -print -quit)"
+          "$APPIMAGE" --appimage-extract >/dev/null
+          BROKEN="$(find squashfs-root -xtype l | wc -l)"
+          echo "dangling symlinks: $BROKEN"
+          test "$BROKEN" -eq 0
+
+      - name: Dry-run emits NDJSON on stdout and nothing else
+        run: |
+          ./build/appalchemist-cli --json --dry-run ./hello.rpm > events.ndjson
+          while read -r line; do
+            [ -z "$line" ] && continue
+            echo "$line" | python3 -c "import json,sys; json.loads(sys.stdin.read())"
+          done < events.ndjson
+          grep -q '"event":"complete"' events.ndjson

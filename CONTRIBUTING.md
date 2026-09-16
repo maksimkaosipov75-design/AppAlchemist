@@ -31,7 +31,8 @@ Install the build dependencies for your distribution, then run:
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j$(nproc)
-./build/appalchemist --help
+./build/appalchemist-gui        # graphical interface
+./build/appalchemist-cli --help # headless converter
 ```
 
 The project currently builds a GTK4/libadwaita frontend backed by Qt6-based conversion components.

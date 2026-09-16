@@ -204,7 +204,6 @@ bool parseLddLine(const QString& rawLine, QString& soname, QString& resolvedPath
     return !soname.isEmpty() && !resolvedPath.isEmpty();
 }
 
-// Relative path expressed for an RPATH $ORIGIN entry, e.g. "../lib".
 // Resolves a bare soname (e.g. "libgnutls.so.30") to a real file on the host,
 // following symlinks so the versioned target is returned rather than a link.
 QString resolveHostLibrary(const QString& soname) {
@@ -237,6 +236,7 @@ QString resolveHostLibrary(const QString& soname) {
     return QString();
 }
 
+// Relative path expressed for an RPATH $ORIGIN entry, e.g. "../lib".
 QString originRelativePath(const QString& fromDir, const QString& toDir) {
     const QString relative = QDir(fromDir).relativeFilePath(toDir);
     if (relative.isEmpty() || relative == ".") {
@@ -625,9 +625,10 @@ LibraryBundleReport DependencyResolver::bundleSystemLibraries(const QString& app
         while (libIt.hasNext()) {
             const QString candidate = libIt.next();
             const QString dir = QFileInfo(candidate).absolutePath();
-            // usr/lib is where this routine puts host libraries; only entries
-            // outside it belong to the package itself.
-            if (dir == lib64Dir || dir == lib32Dir) {
+            // usr/lib is where this routine puts host libraries, module trees
+            // included; only entries outside those trees belong to the package.
+            if (dir == lib64Dir || dir.startsWith(lib64Dir + "/") ||
+                dir == lib32Dir || dir.startsWith(lib32Dir + "/")) {
                 continue;
             }
             const QString name = QFileInfo(candidate).fileName();
@@ -655,8 +656,11 @@ LibraryBundleReport DependencyResolver::bundleSystemLibraries(const QString& app
             // A host copy of the same soname staged into usr/lib would be found
             // first and is usually older than the one the package was built
             // against, so remove it and rely on the package's own library.
+            // Without patchelf the private directory cannot be put on the
+            // search path, so the host copy is the only thing that resolves
+            // and has to stay.
             const QString shadowing = QDir(lib64Dir).absoluteFilePath(it.key());
-            if (QFileInfo::exists(shadowing) && QFile::remove(shadowing)) {
+            if (report.patchelfAvailable && QFileInfo::exists(shadowing) && QFile::remove(shadowing)) {
                 emit log(QString("  using package-provided %1, removed host copy from usr/lib").arg(it.key()));
                 if (!packageRuntimeDirs.contains(dir)) {
                     packageRuntimeDirs << dir;
@@ -734,7 +738,8 @@ LibraryBundleReport DependencyResolver::bundleSystemLibraries(const QString& app
                         privateRpathDirs[binary].insert(providerDir);
                         const QString shadowing =
                             QDir(lib64Dir).absoluteFilePath(QFileInfo(soname).fileName());
-                        if (QFileInfo::exists(shadowing) && shadowing != canonicalHostPath) {
+                        if (report.patchelfAvailable && QFileInfo::exists(shadowing) &&
+                            shadowing != canonicalHostPath) {
                             if (QFile::remove(shadowing)) {
                                 emit log(QString("  using package-provided %1, removed host copy").arg(soname));
                                 report.bundled.removeAll(soname);
@@ -855,7 +860,7 @@ LibraryBundleReport DependencyResolver::bundleSystemLibraries(const QString& app
             // only thing standing in the way: the binaries reach the real file
             // through the RPATH entries added below.
             const QString shipped = appDirLibraryIndex.value(soname);
-            if (!shipped.isEmpty()) {
+            if (!shipped.isEmpty() && report.patchelfAvailable) {
                 const QString shippedDir = QFileInfo(shipped).absolutePath();
                 if (!packageRuntimeDirs.contains(shippedDir)) {
                     packageRuntimeDirs << shippedDir;

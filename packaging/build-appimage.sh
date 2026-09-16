@@ -44,11 +44,17 @@ mkdir -p "$APPDIR/usr/share/applications"
 mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 mkdir -p "$APPDIR/usr/share/mime/packages"
 
-# The project is GTK4-only. Always package the freshly installed appalchemist
-# binary from the current build instead of any stale legacy frontend artifact.
-if [ ! -x "$APPDIR/usr/bin/appalchemist" ]; then
-    echo "ERROR: Freshly built GTK executable not found at $APPDIR/usr/bin/appalchemist"
+# The project is GTK4-only. Always package the freshly installed GTK binary
+# from the current build instead of any stale legacy frontend artifact.
+if [ ! -x "$APPDIR/usr/bin/appalchemist-gui" ]; then
+    echo "ERROR: Freshly built GTK executable not found at $APPDIR/usr/bin/appalchemist-gui"
     exit 1
+fi
+
+# The headless converter is part of the same build; ship it so the AppImage can
+# also be driven from scripts and CI.
+if [ -x "$APPDIR/usr/bin/appalchemist-cli" ]; then
+    echo "Bundling headless CLI: usr/bin/appalchemist-cli"
 fi
 
 # Bundle appimagetool INTO the AppImage so conversions work on user machines
@@ -240,7 +246,7 @@ if [ -f "$LINUXDEPLOY" ]; then
 
     "$LINUXDEPLOY" \
         --appdir "$APPDIR" \
-        --executable "$APPDIR/usr/bin/appalchemist" \
+        --executable "$APPDIR/usr/bin/appalchemist-gui" \
         --desktop-file "$APPDIR/appalchemist.desktop" \
         --icon-file "$APPDIR/appalchemist.png" 2>&1 | grep -v "ERROR: Strip call failed" || true
 
@@ -298,7 +304,7 @@ if [ -d "/usr/lib/gtk-4.0/4.0.0/immodules" ]; then
 fi
 
 # Create/update AppRun script for the GTK-first executable.
-# linuxdeploy may leave AppRun as a symlink to usr/bin/appalchemist.
+# linuxdeploy may leave AppRun as a symlink to usr/bin/appalchemist-gui.
 # Remove it first so we don't accidentally overwrite the main binary.
 rm -f "$APPDIR/AppRun"
 cat > "$APPDIR/AppRun" << 'EOF'
@@ -404,7 +410,14 @@ if [ -d "${HERE}/usr/share/mime/packages" ] && command -v update-mime-database >
     update-mime-database "${HOME}/.local/share/mime" 2>/dev/null || true
 fi
 
-exec "${HERE}/usr/bin/appalchemist" "$@"
+# usr/bin/appalchemist is the installed entry point: it opens the interface
+# when launched with no arguments and runs the headless converter when given a
+# conversion request, which is what the .desktop handlers pass.
+if [ -x "${HERE}/usr/bin/appalchemist" ]; then
+    exec "${HERE}/usr/bin/appalchemist" "$@"
+fi
+
+exec "${HERE}/usr/bin/appalchemist-gui" "$@"
 EOF
 chmod +x "$APPDIR/AppRun"
 

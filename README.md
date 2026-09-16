@@ -175,6 +175,11 @@ The build produces three targets:
 | `appalchemist-cli` | executable | Headless converter, no GTK dependencies |
 | `appalchemist-gui` | executable | GTK4/libadwaita frontend |
 
+Installing also puts `appalchemist` on `PATH`. It is the product's command
+name and forwards to the right binary: a conversion request such as
+`appalchemist --convert app.deb` runs headlessly, while `appalchemist` on its
+own opens the interface. Desktop entries and MIME handlers use it too.
+
 Build options: `-DBUILD_CLI=OFF`, `-DBUILD_GUI=OFF`, `-DENABLE_TESTS=OFF`,
 `-DENABLE_SANITIZERS=ON` (AddressSanitizer + UndefinedBehaviorSanitizer).
 Building only the CLI on a headless machine needs no GTK at all:
