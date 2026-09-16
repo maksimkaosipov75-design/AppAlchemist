@@ -1,6 +1,6 @@
 # Maintainer: AppAlchemist Team <appalchemist@example.com>
 pkgname=appalchemist
-pkgver=1.5.0
+pkgver=1.6.0
 pkgrel=1
 pkgdesc="Convert .deb, .rpm and Linux archives into portable AppImage bundles"
 arch=('x86_64')

@@ -1,5 +1,5 @@
 Name:           appalchemist
-Version:        1.5.0
+Version:        1.6.0
 Release:        1%{?dist}
 Summary:        Convert Linux packages and archives to AppImage format
 License:        MIT
@@ -78,6 +78,11 @@ fi
 %{_datadir}/icons/hicolor/*/apps/appalchemist.png
 
 %changelog
+* Wed Sep 17 2026 AppAlchemist Team <appalchemist@example.com> - 1.6.0-1
+- Converted AppImages no longer ship broken or shadowed libraries
+- Harden archive extraction, subprocess execution and dependency resolution
+- Add the headless appalchemist-cli converter alongside the GTK interface
+
 * Fri Apr 24 2026 AppAlchemist Team <appalchemist@example.com> - 1.5.0-1
 - Synchronize packaging metadata with the public v1.5.0 release
 - Document .deb, .rpm and archive conversion workflows
