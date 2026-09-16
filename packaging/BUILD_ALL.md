@@ -41,7 +41,7 @@ cd /path/to/deb-to-appimage
 ./packaging/build-deb.sh
 ```
 
-Result: `build/appalchemist_1.5.0-1_amd64.deb`
+Result: `build/appalchemist_1.6.0-1_amd64.deb`
 
 ### Fedora/RHEL/CentOS (.rpm)
 ```bash
@@ -49,7 +49,7 @@ cd /path/to/deb-to-appimage
 ./packaging/build-rpm.sh
 ```
 
-Result: `build/rpmbuild/RPMS/x86_64/appalchemist-1.5.0-1.x86_64.rpm`
+Result: `build/rpmbuild/RPMS/x86_64/appalchemist-1.6.0-1.x86_64.rpm`
 
 ### Arch Linux (PKGBUILD)
 ```bash
@@ -63,24 +63,24 @@ cd /path/to/deb-to-appimage/packaging/arch
 makepkg -si
 ```
 
-Result: `appalchemist-1.5.0-1-x86_64.pkg.tar.zst`
+Result: `appalchemist-1.6.0-1-x86_64.pkg.tar.zst`
 
 ## Installing Packages
 
 ### DEB
 ```bash
-sudo dpkg -i build/appalchemist_1.5.0-1_amd64.deb
+sudo dpkg -i build/appalchemist_1.6.0-1_amd64.deb
 sudo apt-get install -f  # Install dependencies if needed
 ```
 
 ### RPM
 ```bash
-sudo rpm -ivh build/rpmbuild/RPMS/x86_64/appalchemist-1.5.0-1.x86_64.rpm
+sudo rpm -ivh build/rpmbuild/RPMS/x86_64/appalchemist-1.6.0-1.x86_64.rpm
 ```
 
 ### Arch
 ```bash
-sudo pacman -U appalchemist-1.5.0-1-x86_64.pkg.tar.zst
+sudo pacman -U appalchemist-1.6.0-1-x86_64.pkg.tar.zst
 ```
 
 ## Verification

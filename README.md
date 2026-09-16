@@ -56,14 +56,14 @@ The goal is practical portability, not magic. Some packages still need manual re
 6. Convert and run the generated AppImage.
 
 ```bash
-chmod +x appalchemist-1.5.0-x86_64.AppImage
-./appalchemist-1.5.0-x86_64.AppImage
+chmod +x appalchemist-1.6.0-x86_64.AppImage
+./appalchemist-1.6.0-x86_64.AppImage
 ```
 
 If FUSE is unavailable on your system:
 
 ```bash
-APPIMAGE_EXTRACT_AND_RUN=1 ./appalchemist-1.5.0-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./appalchemist-1.6.0-x86_64.AppImage
 ```
 
 ## GUI Usage

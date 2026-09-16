@@ -1,3 +1,11 @@
+appalchemist (1.6.0-1) unstable; urgency=medium
+
+  * Converted AppImages no longer ship broken or shadowed libraries.
+  * Harden archive extraction, subprocess execution and dependency resolution.
+  * Add the headless appalchemist-cli converter alongside the GTK interface.
+
+ -- AppAlchemist Team <appalchemist@example.com>  Wed, 17 Sep 2026 00:00:00 +0000
+
 appalchemist (1.5.0-1) unstable; urgency=medium
 
   * Synchronize packaging metadata with the public v1.5.0 release.
