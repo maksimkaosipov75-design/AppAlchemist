@@ -1,5 +1,6 @@
 #include "debparser.h"
 #include "utils.h"
+#include "archive_extractor.h"
 #include <QDir>
 #include <QFileInfo>
 #include <QFile>
@@ -65,8 +66,9 @@ bool DebParser::extractDeb(const QString& debPath, const QString& extractDir) {
         return false;
     }
     
+    const QString absDebPath = QFileInfo(debPath).absoluteFilePath();
     ProcessResult arResult = SubprocessWrapper::execute("ar", 
-        {"x", debPath}, arDir);
+        {"x", "--", absDebPath}, arDir);
     
     if (!arResult.success) {
         return false;
@@ -87,24 +89,37 @@ bool DebParser::extractDeb(const QString& debPath, const QString& extractDir) {
         return false;
     }
     
-    QString tarCommand = "tar";
-    QStringList tarArgs;
-    
-    if (dataTar.endsWith(".gz")) {
-        tarArgs = {"-xzf", dataTar, "-C", extractPath};
-    } else if (dataTar.endsWith(".xz")) {
-        tarArgs = {"-xJf", dataTar, "-C", extractPath};
-    } else if (dataTar.endsWith(".bz2")) {
-        tarArgs = {"-xjf", dataTar, "-C", extractPath};
-    } else if (dataTar.endsWith(".zst") || dataTar.endsWith(".zstd")) {
-        tarArgs = {"--zstd", "-xf", dataTar, "-C", extractPath};
-    } else {
-        tarArgs = {"-xf", dataTar, "-C", extractPath};
+    bool dataExtracted = false;
+    if (ArchiveExtractor::isAvailable()) {
+        QString err;
+        if (ArchiveExtractor::extractSecure(dataTar, extractPath, &err)) {
+            dataExtracted = true;
+        } else {
+            qWarning() << "Failed to securely extract data.tar in deb package:" << err;
+            return false;
+        }
     }
     
-    ProcessResult tarResult = SubprocessWrapper::execute(tarCommand, tarArgs);
-    if (!tarResult.success) {
-        return false;
+    if (!dataExtracted) {
+        QString tarCommand = "tar";
+        QStringList tarArgs = {"--no-same-owner", "-C", extractPath};
+        
+        if (dataTar.endsWith(".gz")) {
+            tarArgs << "-xzf" << dataTar << "--";
+        } else if (dataTar.endsWith(".xz")) {
+            tarArgs << "-xJf" << dataTar << "--";
+        } else if (dataTar.endsWith(".bz2")) {
+            tarArgs << "-xjf" << dataTar << "--";
+        } else if (dataTar.endsWith(".zst") || dataTar.endsWith(".zstd")) {
+            tarArgs << "--zstd" << "-xf" << dataTar << "--";
+        } else {
+            tarArgs << "-xf" << dataTar << "--";
+        }
+        
+        ProcessResult tarResult = SubprocessWrapper::execute(tarCommand, tarArgs);
+        if (!tarResult.success) {
+            return false;
+        }
     }
     
     // Extract control.tar.*
@@ -116,20 +131,38 @@ bool DebParser::extractDeb(const QString& debPath, const QString& extractDir) {
             return false;
         }
         
-        QStringList controlTarArgs;
-        if (controlTar.endsWith(".gz")) {
-            controlTarArgs = {"-xzf", controlTar, "-C", controlPath};
-        } else if (controlTar.endsWith(".xz")) {
-            controlTarArgs = {"-xJf", controlTar, "-C", controlPath};
-        } else if (controlTar.endsWith(".bz2")) {
-            controlTarArgs = {"-xjf", controlTar, "-C", controlPath};
-        } else if (controlTar.endsWith(".zst") || controlTar.endsWith(".zstd")) {
-            controlTarArgs = {"--zstd", "-xf", controlTar, "-C", controlPath};
-        } else {
-            controlTarArgs = {"-xf", controlTar, "-C", controlPath};
+        bool controlExtracted = false;
+        if (ArchiveExtractor::isAvailable()) {
+            QString err;
+            if (ArchiveExtractor::extractSecure(controlTar, controlPath, &err)) {
+                controlExtracted = true;
+            } else {
+                qWarning() << "Failed to securely extract control.tar in deb package:" << err;
+                return false;
+            }
         }
         
-        SubprocessWrapper::execute(tarCommand, controlTarArgs);
+        if (!controlExtracted) {
+            QString tarCommand = "tar";
+            QStringList controlTarArgs = {"--no-same-owner", "-C", controlPath};
+            if (controlTar.endsWith(".gz")) {
+                controlTarArgs << "-xzf" << controlTar << "--";
+            } else if (controlTar.endsWith(".xz")) {
+                controlTarArgs << "-xJf" << controlTar << "--";
+            } else if (controlTar.endsWith(".bz2")) {
+                controlTarArgs << "-xjf" << controlTar << "--";
+            } else if (controlTar.endsWith(".zst") || controlTar.endsWith(".zstd")) {
+                controlTarArgs << "--zstd" << "-xf" << controlTar << "--";
+            } else {
+                controlTarArgs << "-xf" << controlTar << "--";
+            }
+            
+            ProcessResult controlResult = SubprocessWrapper::execute(tarCommand, controlTarArgs);
+            if (!controlResult.success) {
+                qWarning() << "Failed to extract control.tar:" << controlResult.stderrOutput;
+                return false;
+            }
+        }
     }
     
     return true;
@@ -595,7 +628,7 @@ QString DebParser::parseDesktopFile(const QString& desktopPath, DebMetadata& met
         }
     } else if (!execCommand.isEmpty()) {
         // Regular executable
-        QString execPath = execCommand.split(' ').first();
+        QString execPath = extractDesktopExecBinary(execCommand);
         if (execPath.startsWith("/")) {
             QString fullPath = QString("%1%2").arg(dataDir).arg(execPath);
             if (QFileInfo::exists(fullPath)) {
@@ -645,7 +678,7 @@ QString DebParser::parseDesktopFile(const QString& desktopPath, DebMetadata& met
                 break;
             }
             // Try with extensions
-            for (const QString& ext : {"png", "svg", "xpm", "ico"}) {
+            for (const char* ext : {"png", "svg", "xpm", "ico"}) {
                 QString pathWithExt = QString("%1.%2").arg(path).arg(ext);
                 if (QFileInfo::exists(pathWithExt)) {
                     metadata.iconPath = pathWithExt;

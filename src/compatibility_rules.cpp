@@ -8,11 +8,30 @@
 namespace {
 
 QString rulesPath() {
+    const QString resourcePath = QStringLiteral(":/assets/compatibility_rules.json");
+    if (QFile::exists(resourcePath)) {
+        return resourcePath;
+    }
+
 #ifdef APPALCHEMIST_COMPATIBILITY_RULES_PATH
-    return QStringLiteral(APPALCHEMIST_COMPATIBILITY_RULES_PATH);
-#else
-    return QString();
+    const QString definedPath = QStringLiteral(APPALCHEMIST_COMPATIBILITY_RULES_PATH);
+    if (QFile::exists(definedPath)) {
+        return definedPath;
+    }
 #endif
+
+    const QStringList fallbackPaths = {
+        QStringLiteral("assets/compatibility_rules.json"),
+        QStringLiteral("../assets/compatibility_rules.json"),
+        QStringLiteral("/usr/share/appalchemist/compatibility_rules.json")
+    };
+    for (const QString& candidate : fallbackPaths) {
+        if (QFile::exists(candidate)) {
+            return candidate;
+        }
+    }
+
+    return resourcePath;
 }
 
 QString appTypeToRuleName(AppType type) {

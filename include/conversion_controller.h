@@ -5,6 +5,9 @@
 #include <QString>
 #include <QStringList>
 #include <QThread>
+#include <atomic>
+#include <mutex>
+#include <stop_token>
 #include "packagetoappimagepipeline.h"
 #include "dependency_resolver.h"
 #include "size_optimizer.h"
@@ -34,6 +37,14 @@ public:
     int successCount() const;
     int failureCount() const;
 
+    // Concurrency / cancellation support (SYS-HIGH-11, SYS-HIGH-21)
+    std::stop_token stopToken() const;
+    void requestStop();
+
+    // Testing helper for pipeline cleanup verification
+    PackageToAppImagePipeline* currentPipeline() const;
+    void cleanupCurrentPipeline();
+
 signals:
     void started(int totalCount);
     void packageStarted(int index, int totalCount, const QString& packagePath);
@@ -52,20 +63,22 @@ private slots:
 private:
     void advanceQueue();
     void launchCurrentPackage();
-    void cleanupCurrentPipeline();
     bool requiresSudoPassword(const QString& packagePath) const;
     QString appImageOutputPath(const QString& packagePath) const;
 
     ConversionRequest m_request;
-    PackageToAppImagePipeline* m_pipeline;
-    QThread* m_pipelineThread;
-    int m_currentIndex;
-    int m_successCount;
-    int m_failureCount;
-    bool m_running;
-    bool m_cancelled;
-    bool m_waitingForPassword;
+    PackageToAppImagePipeline* m_currentPipeline = nullptr;
+    PackageToAppImagePipeline*& m_pipeline = m_currentPipeline;
+    QThread* m_pipelineThread = nullptr;
+    std::atomic<int> m_currentIndex{0};
+    std::atomic<int> m_successCount{0};
+    std::atomic<int> m_failureCount{0};
+    std::atomic<bool> m_running{false};
+    std::atomic<bool> m_cancelled{false};
+    std::atomic<bool> m_waitingForPassword{false};
     QString m_cachedSudoPassword;
+    mutable std::mutex m_stateMutex;
+    std::stop_source m_stopSource;
 };
 
 #endif // CONVERSION_CONTROLLER_H

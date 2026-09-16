@@ -160,6 +160,8 @@ QString CacheManager::getConversionCacheDirectory() {
     if (!dir.exists(conversionCacheDir)) {
         dir.mkpath(conversionCacheDir);
     }
+    // Enforce restricted 0700 permissions on cache directory (SEC-MED-32)
+    QFile::setPermissions(conversionCacheDir, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
 
     return conversionCacheDir;
 }
@@ -206,6 +208,9 @@ bool CacheManager::storeConversionMetadata(const QString& packagePath, const QSt
 
     file.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
     file.close();
+
+    // Enforce restricted 0600 permissions on cache file (SEC-MED-32)
+    QFile::setPermissions(metadataPath, QFile::ReadOwner | QFile::WriteOwner);
     return true;
 }
 
@@ -280,12 +285,25 @@ QStringList CacheManager::getLddCache(const QString& binaryHash) {
     }
     
     QString cacheDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    if (cacheDir.isEmpty()) {
+        cacheDir = QDir::homePath() + "/.cache";
+    }
     QString lddCacheDir = QString("%1/appalchemist/ldd_cache").arg(cacheDir);
     QString cacheFile = QString("%1/%2.json").arg(lddCacheDir).arg(binaryHash);
     
     QFile file(cacheFile);
     if (!file.exists()) {
         return QStringList();
+    }
+
+    // Invalidate if /etc/ld.so.cache is newer than cache file (REL-MED-35)
+    QFileInfo ldSoCache("/etc/ld.so.cache");
+    if (ldSoCache.exists()) {
+        QFileInfo cacheFileInfo(cacheFile);
+        if (ldSoCache.lastModified() > cacheFileInfo.lastModified()) {
+            file.remove();
+            return QStringList();
+        }
     }
     
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -304,6 +322,16 @@ QStringList CacheManager::getLddCache(const QString& binaryHash) {
     if (!obj.contains("ldd_output") || !obj["ldd_output"].isArray()) {
         return QStringList();
     }
+
+    // Enforce 24-hour TTL (86400000 ms)
+    if (obj.contains("timestamp")) {
+        qint64 ts = obj["timestamp"].toVariant().toLongLong();
+        qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (now - ts > 86400 * 1000LL) {
+            file.remove();
+            return QStringList();
+        }
+    }
     
     QJsonArray array = obj["ldd_output"].toArray();
     QStringList result;
@@ -320,12 +348,17 @@ void CacheManager::setLddCache(const QString& binaryHash, const QStringList& ldd
     }
     
     QString cacheDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    if (cacheDir.isEmpty()) {
+        cacheDir = QDir::homePath() + "/.cache";
+    }
     QString lddCacheDir = QString("%1/appalchemist/ldd_cache").arg(cacheDir);
     
     QDir dir;
     if (!dir.exists(lddCacheDir)) {
         dir.mkpath(lddCacheDir);
     }
+    // Enforce restricted 0700 permissions on cache directory (SEC-MED-32)
+    QFile::setPermissions(lddCacheDir, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
     
     QString cacheFile = QString("%1/%2.json").arg(lddCacheDir).arg(binaryHash);
     
@@ -343,6 +376,8 @@ void CacheManager::setLddCache(const QString& binaryHash, const QStringList& ldd
     if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
         file.write(doc.toJson());
         file.close();
+        // Enforce restricted 0600 permissions on cache file (SEC-MED-32)
+        QFile::setPermissions(cacheFile, QFile::ReadOwner | QFile::WriteOwner);
     }
 }
 

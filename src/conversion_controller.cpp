@@ -4,7 +4,7 @@
 
 ConversionController::ConversionController(QObject* parent)
     : QObject(parent)
-    , m_pipeline(nullptr)
+    , m_currentPipeline(nullptr)
     , m_pipelineThread(nullptr)
     , m_currentIndex(0)
     , m_successCount(0)
@@ -16,80 +16,114 @@ ConversionController::ConversionController(QObject* parent)
 }
 
 ConversionController::~ConversionController() {
+    cancel();
     cleanupCurrentPipeline();
 }
 
+std::stop_token ConversionController::stopToken() const {
+    return m_stopSource.get_token();
+}
+
+void ConversionController::requestStop() {
+    m_stopSource.request_stop();
+    cancel();
+}
+
+PackageToAppImagePipeline* ConversionController::currentPipeline() const {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    return m_currentPipeline;
+}
+
 void ConversionController::start(const ConversionRequest& request) {
-    if (m_running || request.packagePaths.isEmpty()) {
+    if (m_running.load() || request.packagePaths.isEmpty()) {
         return;
     }
 
-    m_request = request;
-    m_currentIndex = 0;
-    m_successCount = 0;
-    m_failureCount = 0;
-    m_cancelled = false;
-    m_running = true;
-    m_waitingForPassword = false;
-    m_cachedSudoPassword.clear();
+    {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        m_request = request;
+        m_cachedSudoPassword.clear();
+        m_stopSource = std::stop_source();
+    }
+
+    m_currentIndex.store(0);
+    m_successCount.store(0);
+    m_failureCount.store(0);
+    m_cancelled.store(false);
+    m_running.store(true);
+    m_waitingForPassword.store(false);
 
     emit started(m_request.packagePaths.size());
     advanceQueue();
 }
 
 void ConversionController::cancel() {
-    if (!m_running) {
+    m_cancelled.store(true);
+    m_waitingForPassword.store(false);
+    m_stopSource.request_stop();
+
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    if (m_currentPipeline) {
+        m_currentPipeline->cancel();
+    }
+
+    if (!m_running.load()) {
         return;
     }
 
-    m_cancelled = true;
-    m_waitingForPassword = false;
-
-    if (m_pipeline) {
-        m_pipeline->cancel();
-    } else {
-        m_running = false;
-        emit finished(m_successCount, m_failureCount, true);
+    if (!m_currentPipeline) {
+        m_running.store(false);
+        emit finished(m_successCount.load(), m_failureCount.load(), true);
     }
 }
 
 void ConversionController::provideSudoPassword(const QString& password) {
-    m_cachedSudoPassword = password;
-    m_waitingForPassword = false;
+    {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        m_cachedSudoPassword = password;
+    }
+    m_waitingForPassword.store(false);
     launchCurrentPackage();
 }
 
 void ConversionController::continueWithoutSudoPassword() {
-    m_waitingForPassword = false;
+    m_waitingForPassword.store(false);
     launchCurrentPackage();
 }
 
 bool ConversionController::isRunning() const {
-    return m_running;
+    return m_running.load();
 }
 
 int ConversionController::currentIndex() const {
-    return m_currentIndex;
+    return m_currentIndex.load();
 }
 
 int ConversionController::totalCount() const {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
     return m_request.packagePaths.size();
 }
 
 int ConversionController::successCount() const {
-    return m_successCount;
+    return m_successCount.load();
 }
 
 int ConversionController::failureCount() const {
-    return m_failureCount;
+    return m_failureCount.load();
 }
 
 void ConversionController::onPipelineError(const QString& errorMessage) {
+    if (m_cancelled.load()) {
+        return;
+    }
     ++m_failureCount;
     emit error(errorMessage);
 }
 
 void ConversionController::onPipelineSuccess(const QString& appImagePath) {
+    if (m_cancelled.load()) {
+        return;
+    }
     ++m_successCount;
     emit success(appImagePath);
 }
@@ -97,9 +131,9 @@ void ConversionController::onPipelineSuccess(const QString& appImagePath) {
 void ConversionController::onPipelineFinished() {
     cleanupCurrentPipeline();
 
-    if (m_cancelled) {
-        m_running = false;
-        emit finished(m_successCount, m_failureCount, true);
+    if (m_cancelled.load()) {
+        m_running.store(false);
+        emit finished(m_successCount.load(), m_failureCount.load(), true);
         return;
     }
 
@@ -108,21 +142,27 @@ void ConversionController::onPipelineFinished() {
 }
 
 void ConversionController::advanceQueue() {
-    if (!m_running) {
+    if (!m_running.load()) {
         return;
     }
 
-    if (m_currentIndex >= m_request.packagePaths.size()) {
-        m_running = false;
-        emit finished(m_successCount, m_failureCount, false);
+    if (m_currentIndex.load() >= m_request.packagePaths.size()) {
+        m_running.store(false);
+        emit finished(m_successCount.load(), m_failureCount.load(), false);
         return;
     }
 
-    const QString packagePath = m_request.packagePaths.at(m_currentIndex);
-    emit packageStarted(m_currentIndex, m_request.packagePaths.size(), packagePath);
+    const QString packagePath = m_request.packagePaths.at(m_currentIndex.load());
+    emit packageStarted(m_currentIndex.load(), m_request.packagePaths.size(), packagePath);
 
-    if (requiresSudoPassword(packagePath) && m_cachedSudoPassword.isEmpty()) {
-        m_waitingForPassword = true;
+    bool cachedEmpty = false;
+    {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        cachedEmpty = m_cachedSudoPassword.isEmpty();
+    }
+
+    if (requiresSudoPassword(packagePath) && cachedEmpty) {
+        m_waitingForPassword.store(true);
         emit sudoPasswordRequested(
             packagePath,
             tr("Sudo password is required to resolve dependencies via pacman for this package.")
@@ -134,41 +174,43 @@ void ConversionController::advanceQueue() {
 }
 
 void ConversionController::launchCurrentPackage() {
-    if (!m_running || m_waitingForPassword || m_currentIndex >= m_request.packagePaths.size()) {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    if (!m_running.load() || m_waitingForPassword.load() || m_currentIndex.load() >= m_request.packagePaths.size()) {
         return;
     }
 
-    const QString packagePath = m_request.packagePaths.at(m_currentIndex);
+    const QString packagePath = m_request.packagePaths.at(m_currentIndex.load());
 
     m_pipelineThread = new QThread(this);
-    m_pipeline = new PackageToAppImagePipeline();
-    m_pipeline->moveToThread(m_pipelineThread);
+    m_currentPipeline = new PackageToAppImagePipeline();
+    m_currentPipeline->setStopToken(m_stopSource.get_token());
+    m_currentPipeline->moveToThread(m_pipelineThread);
 
-    connect(m_pipelineThread, &QThread::started, m_pipeline, &PackageToAppImagePipeline::start);
-    connect(m_pipeline, &PackageToAppImagePipeline::progress, this, &ConversionController::progress);
-    connect(m_pipeline, &PackageToAppImagePipeline::log, this, &ConversionController::log);
-    connect(m_pipeline, &PackageToAppImagePipeline::error, this, &ConversionController::onPipelineError);
-    connect(m_pipeline, &PackageToAppImagePipeline::success, this, &ConversionController::onPipelineSuccess);
-    connect(m_pipeline, &PackageToAppImagePipeline::finished, this, &ConversionController::onPipelineFinished);
-    connect(m_pipelineThread, &QThread::finished, m_pipeline, &QObject::deleteLater);
+    connect(m_pipelineThread, &QThread::started, m_currentPipeline, &PackageToAppImagePipeline::start);
+    connect(m_currentPipeline, &PackageToAppImagePipeline::progress, this, &ConversionController::progress);
+    connect(m_currentPipeline, &PackageToAppImagePipeline::log, this, &ConversionController::log);
+    connect(m_currentPipeline, &PackageToAppImagePipeline::error, this, &ConversionController::onPipelineError);
+    connect(m_currentPipeline, &PackageToAppImagePipeline::success, this, &ConversionController::onPipelineSuccess);
+    connect(m_currentPipeline, &PackageToAppImagePipeline::finished, this, &ConversionController::onPipelineFinished);
 
-    m_pipeline->setPackagePath(packagePath);
-    m_pipeline->setOptimizationSettings(m_request.optimizationSettings);
-    m_pipeline->setDependencySettings(m_request.dependencySettings);
+    m_currentPipeline->setPackagePath(packagePath);
+    m_currentPipeline->setOptimizationSettings(m_request.optimizationSettings);
+    m_currentPipeline->setDependencySettings(m_request.dependencySettings);
 
     const QString outputPath = appImageOutputPath(packagePath);
     if (!outputPath.isEmpty()) {
-        m_pipeline->setOutputPath(outputPath);
+        m_currentPipeline->setOutputPath(outputPath);
     }
 
     if (!m_cachedSudoPassword.isEmpty()) {
-        m_pipeline->setSudoPassword(m_cachedSudoPassword);
+        m_currentPipeline->setSudoPassword(m_cachedSudoPassword);
     }
 
     m_pipelineThread->start();
 }
 
 void ConversionController::cleanupCurrentPipeline() {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
     if (m_pipelineThread) {
         m_pipelineThread->quit();
         m_pipelineThread->wait();
@@ -176,7 +218,10 @@ void ConversionController::cleanupCurrentPipeline() {
         m_pipelineThread = nullptr;
     }
 
-    m_pipeline = nullptr;
+    if (m_currentPipeline) {
+        delete m_currentPipeline;
+        m_currentPipeline = nullptr;
+    }
 }
 
 bool ConversionController::requiresSudoPassword(const QString& packagePath) const {

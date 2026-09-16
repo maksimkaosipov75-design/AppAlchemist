@@ -4,6 +4,7 @@
 #include <QString>
 #include <QStringList>
 #include <QSet>
+#include <QProcessEnvironment>
 
 struct LibraryInfo {
     QString path;
@@ -21,11 +22,13 @@ public:
     bool isSystemLibrary(const QString& libraryPath);
     QStringList checkSystemDependencies(const QStringList& packageDepends);
     
+    // Safely runs ldd under bwrap sandbox or passively parses via readelf -d DT_NEEDED
+    static QStringList runLdd(const QString& executablePath, const QProcessEnvironment& env = QProcessEnvironment());
+
 private:
     QSet<QString> m_systemLibraryPatterns;
     QSet<QString> m_systemPackagePatterns;
     void initializeSystemPatterns();
-    QStringList runLdd(const QString& executablePath);
 };
 
 #endif // DEPENDENCYANALYZER_H

@@ -9,6 +9,7 @@
 #include <QFile>
 #include <QMetaObject>
 #include <QRegularExpression>
+#include <QTemporaryDir>
 
 PackageToAppImagePipeline::PackageToAppImagePipeline(QObject* parent)
     : QObject(parent)
@@ -78,13 +79,37 @@ void PackageToAppImagePipeline::setSudoPassword(const QString& password) {
     m_dependencyResolver->setSudoPassword(password);
 }
 
+void PackageToAppImagePipeline::setStopToken(std::stop_token token) {
+    m_stopToken = token;
+}
+
+bool PackageToAppImagePipeline::isCancelled() const {
+    if (m_cancelled.load()) {
+        return true;
+    }
+    if (m_stopToken.has_value() && m_stopToken->stop_requested()) {
+        return true;
+    }
+    return false;
+}
+
+void PackageToAppImagePipeline::setDryRun(bool dryRun) {
+    m_dryRun = dryRun;
+}
+
+bool PackageToAppImagePipeline::isDryRun() const {
+    return m_dryRun;
+}
+
 void PackageToAppImagePipeline::start() {
-    m_cancelled = false;
+    if (!isCancelled()) {
+        m_cancelled.store(false);
+    }
     QMetaObject::invokeMethod(this, "process", Qt::QueuedConnection);
 }
 
 void PackageToAppImagePipeline::cancel() {
-    m_cancelled = true;
+    m_cancelled.store(true);
     emit log("Operation cancelled by user");
 }
 
@@ -117,26 +142,33 @@ void PackageToAppImagePipeline::process() {
     }
     emit log(QString("=== Starting %1 to AppImage conversion ===").arg(packageTypeStr));
     
-    // Create temp directory in /tmp (RAM-optimized)
-    m_tempDir = QString("/tmp/appalchemist-%1")
-        .arg(QString::number(QDateTime::currentMSecsSinceEpoch()));
-    
-    if (!SubprocessWrapper::createDirectory(m_tempDir)) {
+    // Create secure temp directory with 0700 permissions
+    QTemporaryDir tempDir(QDir::tempPath() + "/appalchemist-XXXXXX");
+    tempDir.setAutoRemove(false);
+    if (!tempDir.isValid()) {
         emit error("Failed to create temporary directory");
         emit finished();
         return;
     }
+    m_tempDir = tempDir.path();
+    QFile::setPermissions(m_tempDir, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
     
     emit log(QString("Using temporary directory: %1").arg(m_tempDir));
     
     // Step 1: Validate input
-    if (m_cancelled) {
+    if (isCancelled()) {
+        cleanup();
         emit finished();
         return;
     }
     
     emit progress(10, QString("Validating %1 file...").arg(packageTypeStr));
     if (!validateInput()) {
+        if (isCancelled()) {
+            cleanup();
+            emit finished();
+            return;
+        }
         emit error(QString("Invalid %1 file").arg(packageTypeStr));
         cleanup();
         emit finished();
@@ -144,13 +176,19 @@ void PackageToAppImagePipeline::process() {
     }
     
     // Step 2: Extract .deb
-    if (m_cancelled) {
+    if (isCancelled()) {
+        cleanup();
         emit finished();
         return;
     }
     
     emit progress(20, QString("Extracting %1 package...").arg(packageTypeStr));
     if (!extractPackage()) {
+        if (isCancelled()) {
+            cleanup();
+            emit finished();
+            return;
+        }
         emit error(QString("Failed to extract %1 package or no executables found").arg(packageTypeStr));
         cleanup();
         emit finished();
@@ -158,20 +196,43 @@ void PackageToAppImagePipeline::process() {
     }
     
     // Step 3: Analyze dependencies
-    if (m_cancelled) {
+    if (isCancelled()) {
+        cleanup();
         emit finished();
         return;
     }
     
     emit progress(40, "Analyzing dependencies...");
     if (!analyzeDependencies()) {
+        if (isCancelled()) {
+            cleanup();
+            emit finished();
+            return;
+        }
         emit error("Failed to analyze dependencies");
         cleanup();
         emit finished();
         return;
     }
 
+    if (m_dryRun) {
+        emit progress(100, "Dry-run validation complete");
+        emit log(QString("Dry-run inspection succeeded for %1 (Format: %2, Profile: %3)")
+                     .arg(m_packagePath)
+                     .arg(packageTypeStr)
+                     .arg(PackageClassifier::applicationProfileToString(m_packageProfile.applicationProfile)));
+        emit success(m_outputPath.isEmpty() ? m_packagePath + ".AppImage" : m_outputPath);
+        cleanup();
+        emit finished();
+        return;
+    }
+
     if (!executeConversionPlan()) {
+        if (isCancelled()) {
+            cleanup();
+            emit finished();
+            return;
+        }
         QString errorMsg = "Failed to build AppImage.\n\n";
         if (m_appImageBuilder->findAppImageTool().isEmpty()) {
             errorMsg += "AppImageTool not found!\n\n";
@@ -185,6 +246,12 @@ void PackageToAppImagePipeline::process() {
             errorMsg += "Check the logs for details.";
         }
         emit error(errorMsg);
+        cleanup();
+        emit finished();
+        return;
+    }
+
+    if (isCancelled()) {
         cleanup();
         emit finished();
         return;
@@ -240,7 +307,7 @@ bool PackageToAppImagePipeline::executeFastPath() {
         return false;
     }
 
-    if (m_cancelled) {
+    if (isCancelled()) {
         return false;
     }
 
@@ -261,13 +328,13 @@ bool PackageToAppImagePipeline::executeFastPath() {
         return false;
     }
 
-    if (m_cancelled) {
+    if (isCancelled()) {
         return false;
     }
 
     bundleAppDirLibraries("Fast path");
 
-    if (m_cancelled) {
+    if (isCancelled()) {
         return false;
     }
 
@@ -275,7 +342,7 @@ bool PackageToAppImagePipeline::executeFastPath() {
         return false;
     }
 
-    if (m_cancelled) {
+    if (isCancelled()) {
         return false;
     }
 
@@ -283,7 +350,7 @@ bool PackageToAppImagePipeline::executeFastPath() {
         return false;
     }
 
-    if (m_cancelled) {
+    if (isCancelled()) {
         return false;
     }
 
@@ -299,7 +366,7 @@ bool PackageToAppImagePipeline::executeRepairPath() {
     emit log(QString("Attempting repair-oriented path for profile '%1'.")
              .arg(PackageClassifier::applicationProfileToString(m_packageProfile.applicationProfile)));
 
-    if (m_cancelled) {
+    if (isCancelled()) {
         return false;
     }
 
@@ -317,7 +384,7 @@ bool PackageToAppImagePipeline::executeRepairPath() {
 
     bundleAppDirLibraries("Repair path");
 
-    if (m_cancelled) {
+    if (isCancelled()) {
         return false;
     }
 
@@ -336,7 +403,7 @@ bool PackageToAppImagePipeline::executeRepairPath() {
         }
     }
 
-    if (m_cancelled) {
+    if (isCancelled()) {
         return false;
     }
 
@@ -348,7 +415,7 @@ bool PackageToAppImagePipeline::executeRepairPath() {
         return false;
     }
 
-    if (m_cancelled) {
+    if (isCancelled()) {
         return false;
     }
 
@@ -356,7 +423,7 @@ bool PackageToAppImagePipeline::executeRepairPath() {
         return false;
     }
 
-    if (m_cancelled) {
+    if (isCancelled()) {
         return false;
     }
 
@@ -369,7 +436,7 @@ bool PackageToAppImagePipeline::executeRepairPath() {
 }
 
 bool PackageToAppImagePipeline::executeFallbackPath() {
-    if (m_cancelled) {
+    if (isCancelled()) {
         return false;
     }
 
@@ -379,7 +446,7 @@ bool PackageToAppImagePipeline::executeFallbackPath() {
         return false;
     }
 
-    if (m_cancelled) {
+    if (isCancelled()) {
         return false;
     }
 
@@ -387,7 +454,7 @@ bool PackageToAppImagePipeline::executeFallbackPath() {
 
     bundleAppDirLibraries("Fallback path");
 
-    if (m_cancelled) {
+    if (isCancelled()) {
         return false;
     }
 
@@ -399,7 +466,7 @@ bool PackageToAppImagePipeline::executeFallbackPath() {
         }
     }
 
-    if (m_cancelled) {
+    if (isCancelled()) {
         return false;
     }
 
@@ -407,7 +474,7 @@ bool PackageToAppImagePipeline::executeFallbackPath() {
         return false;
     }
 
-    if (m_cancelled) {
+    if (isCancelled()) {
         return false;
     }
 
@@ -415,7 +482,7 @@ bool PackageToAppImagePipeline::executeFallbackPath() {
         emit log("WARNING: Fallback runtime probe reported issues, continuing to package anyway");
     }
 
-    if (m_cancelled) {
+    if (isCancelled()) {
         return false;
     }
 
@@ -668,13 +735,12 @@ QStringList PackageToAppImagePipeline::findMissingRuntimeLibraries(const QString
     const QString existingLdPath = env.value("LD_LIBRARY_PATH");
     env.insert("LD_LIBRARY_PATH", QString("%1/usr/lib:%2").arg(m_appDirPath, existingLdPath));
 
-    const ProcessResult result = SubprocessWrapper::execute("ldd", {executablePath}, {}, 15000, env);
-    if (!result.success) {
+    const QStringList lines = m_dependencyResolver ? m_dependencyResolver->runSafeLdd(executablePath, env)
+                                                   : DependencyResolver::runSafeLdd(executablePath, env);
+    if (lines.isEmpty()) {
         missingLibraries << "__ldd_failed__";
         return missingLibraries;
     }
-
-    const QStringList lines = result.stdoutOutput.split('\n', Qt::SkipEmptyParts);
     for (const QString& line : lines) {
         if (!line.contains("not found")) {
             continue;
@@ -745,8 +811,10 @@ bool PackageToAppImagePipeline::analyzeDependencies() {
         emit log("Resolving package dependencies...");
         m_dependencyResolver->setSettings(m_dependencySettings);
         
+        const QString stagedDepsDir = m_appDirPath.isEmpty() ? (m_tempDir + "/staged_deps") : m_appDirPath;
+        QDir().mkpath(stagedDepsDir);
         QList<ResolvedDependency> resolved = m_dependencyResolver->resolveDependencies(
-            m_metadata.depends, m_appDirPath);
+            m_metadata.depends, stagedDepsDir);
         
         // Add resolved libraries to the list
         QStringList additionalLibs = m_dependencyResolver->getResolvedLibraries();
@@ -773,6 +841,16 @@ bool PackageToAppImagePipeline::buildAppDir() {
     }
 
     m_appDirPath = result.appDirPath;
+
+    // Recursively copy all staged dependency libraries AND soname symlinks into the final AppDir
+    const QString stagedLibDir = m_tempDir + "/staged_deps/usr/lib";
+    if (QDir(stagedLibDir).exists()) {
+        const QString targetLibDir = m_appDirPath + "/usr/lib";
+        QDir().mkpath(targetLibDir);
+        emit log("Copying staged dependency libraries and symlinks into AppDir...");
+        SubprocessWrapper::copyDirectory(stagedLibDir, targetLibDir);
+    }
+
     return true;
 }
 
@@ -797,4 +875,5 @@ void PackageToAppImagePipeline::cleanup() {
         emit log("Cleaning up temporary files...");
         SubprocessWrapper::removeDirectory(m_tempDir);
     }
+    m_tempDir.clear();
 }

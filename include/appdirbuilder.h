@@ -19,6 +19,9 @@ public:
     bool fixDesktopFile(const QString& desktopPath, const PackageMetadata& metadata);
     bool copyIcon(const QString& appDirPath, const QString& iconPath, const PackageMetadata& metadata);
     bool createAppRun(const QString& appDirPath, const PackageMetadata& metadata);
+
+    // Search for appimagetool across PATH, AppImage runtimes, standard system paths, and custom env var (REL-LOW-52)
+    static QString findAppImageTool();
     
 private:
     bool createDirectoryStructure(const QString& appDirPath);

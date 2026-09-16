@@ -4,6 +4,9 @@
 #include <QObject>
 #include <QString>
 #include <QThread>
+#include <atomic>
+#include <stop_token>
+#include <optional>
 #include "debparser.h"
 #include "rpmparser.h"
 #include "tarballparser.h"
@@ -34,6 +37,10 @@ public:
     void setSudoPassword(const QString& password);
     void start();
     void cancel();
+    void setStopToken(std::stop_token token);
+    bool isCancelled() const;
+    void setDryRun(bool dryRun);
+    bool isDryRun() const;
 
 signals:
     void progress(int percentage, const QString& message);
@@ -71,7 +78,9 @@ private:
     PackageFormat m_packageType;
     PackageProfile m_packageProfile;
     ConversionPlan m_conversionPlan;
-    bool m_cancelled;
+    std::atomic<bool> m_cancelled{false};
+    std::optional<std::stop_token> m_stopToken;
+    bool m_dryRun{false};
     
     PackageFormat detectPackageType(const QString& packagePath);
     bool validateInput();

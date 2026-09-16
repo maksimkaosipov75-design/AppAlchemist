@@ -7,6 +7,10 @@
 #include <QThread>
 #include <QDebug>
 #include <QRegularExpression>
+#include <QSet>
+#include <QTemporaryDir>
+#include <unistd.h>
+#include <limits.h>
 
 namespace {
 QString stripQuotes(QString value) {
@@ -21,14 +25,11 @@ QString stripQuotes(QString value) {
 }
 
 QString readRawSymlinkTarget(const QString& path) {
-    // Use readlink to get the raw symlink target (not resolved)
-    // QFileInfo::symLinkTarget() resolves to absolute path which breaks AppImage portability
-    QProcess proc;
-    proc.setProgram("readlink");
-    proc.setArguments({path});
-    proc.start();
-    if (proc.waitForFinished(5000) && proc.exitCode() == 0) {
-        return QString::fromUtf8(proc.readAllStandardOutput()).trimmed();
+    char buf[PATH_MAX];
+    ssize_t len = ::readlink(path.toUtf8().constData(), buf, sizeof(buf) - 1);
+    if (len != -1) {
+        buf[len] = '\0';
+        return QString::fromUtf8(buf);
     }
     return QString();
 }
@@ -86,8 +87,17 @@ bool recreateSymlink(const QFileInfo& sourceInfo, const QString& destination,
     QString rawTarget = readRawSymlinkTarget(sourceInfo.absoluteFilePath());
 
     if (!rawTarget.isEmpty() && !rawTarget.startsWith("/")) {
-        // Relative symlink — preserve as-is, it will work correctly in AppDir
-        // as long as the directory structure is maintained
+        // Relative symlink: verify it stays strictly confined inside destRoot if destRoot is provided
+        if (!destRoot.isEmpty()) {
+            const QString symlinkDir = QFileInfo(destination).absolutePath();
+            const QString resolved = QDir::cleanPath(symlinkDir + "/" + rawTarget);
+            const QString cleanDestRoot = QDir::cleanPath(destRoot);
+            if (!resolved.startsWith(cleanDestRoot + "/") && resolved != cleanDestRoot) {
+                qWarning() << "Refusing to create escaping relative symlink:" << rawTarget
+                           << "resolved to:" << resolved;
+                return false;
+            }
+        }
         QFile::remove(destination);
         return QFile::link(rawTarget, destination);
     }
@@ -123,7 +133,18 @@ bool recreateSymlink(const QFileInfo& sourceInfo, const QString& destination,
         }
     }
 
-    // Last resort: use absolute target (old behavior)
+    // Reject dangerous host system targets
+    const QString cleanAbsolute = QDir::cleanPath(absoluteTarget);
+    if (cleanAbsolute.startsWith("/etc") || cleanAbsolute.startsWith("/root") ||
+        cleanAbsolute.startsWith("/home") || cleanAbsolute.startsWith("/var") ||
+        cleanAbsolute.startsWith("/tmp") || cleanAbsolute.startsWith("/dev") ||
+        cleanAbsolute.startsWith("/proc") || cleanAbsolute.startsWith("/sys")) {
+        qWarning() << "Refusing to create symlink to dangerous host path:" << absoluteTarget
+                   << "for" << destination;
+        return false;
+    }
+
+    // Last resort: use absolute target (old behavior for other paths)
     qWarning() << "Could not make symlink relative, using absolute target:" << absoluteTarget
                << "for" << destination;
     QFile::remove(destination);
@@ -166,6 +187,7 @@ ProcessResult SubprocessWrapper::execute(const QString& command,
     
     if (!process.waitForFinished(timeoutMs)) {
         process.kill();
+        process.waitForFinished(1000);
         result.errorMessage = QString("Process timed out: %1").arg(command);
         return result;
     }
@@ -173,7 +195,7 @@ ProcessResult SubprocessWrapper::execute(const QString& command,
     result.exitCode = process.exitCode();
     result.stdoutOutput = QString::fromUtf8(process.readAllStandardOutput());
     result.stderrOutput = QString::fromUtf8(process.readAllStandardError());
-    result.success = (result.exitCode == 0);
+    result.success = (process.exitStatus() == QProcess::NormalExit && result.exitCode == 0);
     
     if (!result.success) {
         result.errorMessage = QString("Process failed with exit code %1: %2")
@@ -212,6 +234,8 @@ ProcessResult SubprocessWrapper::executePipeline(const QString& producerCommand,
     if (!producer.waitForStarted(timeoutMs) || !consumer.waitForStarted(timeoutMs)) {
         producer.kill();
         consumer.kill();
+        producer.waitForFinished(1000);
+        consumer.waitForFinished(1000);
         result.errorMessage = QString("Failed to start pipeline: %1 | %2")
             .arg(producerCommand, consumerCommand);
         return result;
@@ -220,6 +244,8 @@ ProcessResult SubprocessWrapper::executePipeline(const QString& producerCommand,
     if (!producer.waitForFinished(timeoutMs) || !consumer.waitForFinished(timeoutMs)) {
         producer.kill();
         consumer.kill();
+        producer.waitForFinished(1000);
+        consumer.waitForFinished(1000);
         result.errorMessage = QString("Pipeline timed out: %1 | %2")
             .arg(producerCommand, consumerCommand);
         return result;
@@ -234,7 +260,8 @@ ProcessResult SubprocessWrapper::executePipeline(const QString& producerCommand,
         result.stderrOutput += producerErrors;
     }
 
-    result.success = (producer.exitCode() == 0 && consumer.exitCode() == 0);
+    result.success = (producer.exitStatus() == QProcess::NormalExit && producer.exitCode() == 0 &&
+                      consumer.exitStatus() == QProcess::NormalExit && consumer.exitCode() == 0);
     if (!result.success) {
         result.errorMessage = QString("Pipeline failed (%1 exit %2, %3 exit %4): %5")
             .arg(producerCommand)
@@ -280,17 +307,25 @@ bool SubprocessWrapper::copyFile(const QString& source, const QString& destinati
     return true;
 }
 
-bool SubprocessWrapper::copyDirectory(const QString& source, const QString& destination) {
-    return copyDirectory(source, destination, QString(), QString());
-}
-
-bool SubprocessWrapper::copyDirectory(const QString& source, const QString& destination,
-                                      const QString& extractedRoot, const QString& destRoot) {
+namespace {
+bool copyDirectoryHelper(const QString& source, const QString& destination,
+                         const QString& extractedRoot, const QString& destRoot,
+                         QSet<QString>& visitedDirs) {
     QDir sourceDir(source);
     if (!sourceDir.exists()) {
         qWarning() << "Source directory does not exist:" << source;
         return false;
     }
+
+    QString canonicalSource = QFileInfo(source).canonicalFilePath();
+    if (canonicalSource.isEmpty()) {
+        canonicalSource = QDir::cleanPath(source);
+    }
+    if (visitedDirs.contains(canonicalSource)) {
+        qWarning() << "Symlink loop / cycle detected in copyDirectory, skipping already visited directory:" << source;
+        return true;
+    }
+    visitedDirs.insert(canonicalSource);
 
     QDir destDir(destination);
     if (!destDir.exists()) {
@@ -308,30 +343,67 @@ bool SubprocessWrapper::copyDirectory(const QString& source, const QString& dest
         const QString destPath = destDir.absoluteFilePath(entry.fileName());
 
         if (entry.isSymLink()) {
-            if (!copyFile(srcPath, destPath, extractedRoot, destRoot)) {
+            if (!SubprocessWrapper::copyFile(srcPath, destPath, extractedRoot, destRoot)) {
                 qWarning() << "Failed to copy symlink:" << srcPath << "to" << destPath;
             }
             continue;
         }
 
         if (entry.isDir()) {
-            if (!copyDirectory(srcPath, destPath, extractedRoot, destRoot)) {
+            QString canonicalEntry = entry.canonicalFilePath();
+            if (canonicalEntry.isEmpty()) {
+                canonicalEntry = QDir::cleanPath(srcPath);
+            }
+            if (visitedDirs.contains(canonicalEntry)) {
+                qWarning() << "Symlink loop / cycle detected in copyDirectory, skipping subdirectory:" << srcPath;
+                continue;
+            }
+            if (!copyDirectoryHelper(srcPath, destPath, extractedRoot, destRoot, visitedDirs)) {
                 qWarning() << "Failed to copy subdirectory:" << srcPath;
             }
             continue;
         }
 
-        if (!copyFile(srcPath, destPath, extractedRoot, destRoot)) {
+        if (!SubprocessWrapper::copyFile(srcPath, destPath, extractedRoot, destRoot)) {
             qWarning() << "Failed to copy file:" << srcPath << "to" << destPath;
         }
     }
 
     return true;
 }
+}
+
+bool SubprocessWrapper::copyDirectory(const QString& source, const QString& destination) {
+    return copyDirectory(source, destination, QString(), QString());
+}
+
+bool SubprocessWrapper::copyDirectory(const QString& source, const QString& destination,
+                                      const QString& extractedRoot, const QString& destRoot) {
+    QSet<QString> visitedDirs;
+    return copyDirectoryHelper(source, destination, extractedRoot, destRoot, visitedDirs);
+}
 
 bool SubprocessWrapper::createDirectory(const QString& path) {
     QDir dir;
-    return dir.mkpath(path);
+    bool ok = dir.mkpath(path);
+    if (ok) {
+        if (path.startsWith(QDir::tempPath()) || path.startsWith("/tmp")) {
+            QFile::setPermissions(path, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+        }
+    }
+    return ok;
+}
+
+QString SubprocessWrapper::createTemporaryDirectory(const QString& prefix) {
+    const QString effectivePrefix = prefix.isEmpty() ? QStringLiteral("appalchemist") : prefix;
+    QTemporaryDir tempDir(QDir::tempPath() + "/" + effectivePrefix + "-XXXXXX");
+    tempDir.setAutoRemove(false);
+    if (!tempDir.isValid()) {
+        return QString();
+    }
+    const QString path = tempDir.path();
+    QFile::setPermissions(path, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    return path;
 }
 
 bool SubprocessWrapper::removeDirectory(const QString& path) {
@@ -622,6 +694,7 @@ ProcessResult SubprocessWrapper::executeWithSudo(const QString& command,
     
     if (!process.waitForFinished(timeoutMs)) {
         process.kill();
+        process.waitForFinished(1000);
         result.errorMessage = QString("Sudo process timed out: %1").arg(command);
         return result;
     }
@@ -629,7 +702,7 @@ ProcessResult SubprocessWrapper::executeWithSudo(const QString& command,
     result.exitCode = process.exitCode();
     result.stdoutOutput = QString::fromUtf8(process.readAllStandardOutput());
     result.stderrOutput = QString::fromUtf8(process.readAllStandardError());
-    result.success = (result.exitCode == 0);
+    result.success = (process.exitStatus() == QProcess::NormalExit && result.exitCode == 0);
     
     if (!result.success) {
         result.errorMessage = QString("Sudo process failed with exit code %1: %2")

@@ -1,21 +1,38 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.22)
 
 project(appalchemist VERSION 1.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-
-find_package(Qt6 REQUIRED COMPONENTS Core Network Xml Sql)
-find_package(PkgConfig QUIET)
-
 set(CMAKE_AUTOMOC ON)
 
-include_directories(
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
+# ----------------------------------------------------------------------------
+# Build Options
+# ----------------------------------------------------------------------------
+option(BUILD_CLI "Build standalone command-line converter" ON)
+option(BUILD_GUI "Build GTK4/Libadwaita graphical interface" ON)
+option(ENABLE_TESTS "Build Catch2 unit and integration tests" ON)
+option(ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 
-set(APPALCHEMIST_BACKEND_SOURCES
+# Ensure ~/.local is searched for packages
+list(APPEND CMAKE_PREFIX_PATH "$ENV{HOME}/.local")
+
+# ----------------------------------------------------------------------------
+# Core Dependencies (Removed phantom Qt6::Xml and Qt6::Sql)
+# ----------------------------------------------------------------------------
+find_package(Qt6 REQUIRED COMPONENTS Core Network)
+find_package(PkgConfig REQUIRED)
+find_package(ZLIB REQUIRED)
+
+# libarchive for in-process archive extraction
+pkg_check_modules(LIBARCHIVE REQUIRED IMPORTED_TARGET libarchive)
+pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
+
+# ----------------------------------------------------------------------------
+# Core Static Library: appalchemist_core
+# ----------------------------------------------------------------------------
+set(APPALCHEMIST_CORE_SOURCES
     src/packagetoappimagepipeline.cpp
     src/debparser.cpp
     src/rpmparser.cpp
@@ -40,7 +57,7 @@ set(APPALCHEMIST_BACKEND_SOURCES
     src/cache_manager.cpp
 )
 
-set(APPALCHEMIST_BACKEND_HEADERS
+set(APPALCHEMIST_CORE_HEADERS
     include/packagetoappimagepipeline.h
     include/debparser.h
     include/rpmparser.h
@@ -65,102 +82,154 @@ set(APPALCHEMIST_BACKEND_HEADERS
     include/cache_manager.h
 )
 
-add_library(appalchemist_backend STATIC
-    ${APPALCHEMIST_BACKEND_SOURCES}
-    ${APPALCHEMIST_BACKEND_HEADERS}
+add_library(appalchemist_core STATIC
+    ${APPALCHEMIST_CORE_SOURCES}
+    ${APPALCHEMIST_CORE_HEADERS}
 )
 
-target_link_libraries(appalchemist_backend
+# ----------------------------------------------------------------------------
+# Embedded Assets (Qt Resource System)
+# ----------------------------------------------------------------------------
+qt_add_resources(appalchemist_core "core_assets"
+    PREFIX "/assets"
+    BASE "assets"
+    FILES
+        assets/compatibility_rules.json
+        assets/AppRun.template
+)
+
+target_include_directories(appalchemist_core
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+)
+
+target_link_libraries(appalchemist_core
     PUBLIC
         Qt6::Core
         Qt6::Network
-        Qt6::Xml
-        Qt6::Sql
+        PkgConfig::LIBARCHIVE
+        PkgConfig::ZSTD
+        ZLIB::ZLIB
 )
 
-target_compile_definitions(appalchemist_backend
-    PRIVATE
-        APPALCHEMIST_COMPATIBILITY_RULES_PATH="${CMAKE_CURRENT_SOURCE_DIR}/assets/compatibility_rules.json"
+target_compile_definitions(appalchemist_core
+    PUBLIC
+        HAVE_LIBARCHIVE
+        APPALCHEMIST_VERSION="${PROJECT_VERSION}"
 )
 
-# libarchive lets us unpack RPM (and its gzip/xz/lzma/bzip2/zstd payloads)
-# entirely in-process, removing the runtime dependency on rpm2cpio/cpio/bsdtar.
-# Optional: if it is not found the code falls back to external tools.
-if(PkgConfig_FOUND)
-    pkg_check_modules(LIBARCHIVE IMPORTED_TARGET libarchive)
-endif()
-
-if(LIBARCHIVE_FOUND)
-    target_link_libraries(appalchemist_backend PUBLIC PkgConfig::LIBARCHIVE)
-    target_compile_definitions(appalchemist_backend PRIVATE HAVE_LIBARCHIVE)
-    message(STATUS "libarchive found: in-process RPM extraction enabled")
+# Strict Compiler Warnings
+if(MSVC)
+    target_compile_options(appalchemist_core PRIVATE /W4 /permissive-)
 else()
-    message(WARNING "libarchive not found: RPM extraction will rely on external tools (bsdtar/rpm2cpio)")
+    target_compile_options(appalchemist_core PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
 endif()
 
-if(PkgConfig_FOUND)
-    pkg_check_modules(GTK_FRONTEND IMPORTED_TARGET gtk4>=4.10 libadwaita-1>=1.5)
+# Sanitizers
+if(ENABLE_SANITIZERS)
+    target_compile_options(appalchemist_core PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(appalchemist_core PUBLIC -fsanitize=address,undefined)
 endif()
 
-if(GTK_FRONTEND_FOUND)
-    add_executable(appalchemist
+# ----------------------------------------------------------------------------
+# Standalone Headless CLI Target: appalchemist-cli (ZERO GTK Dependencies)
+# ----------------------------------------------------------------------------
+if(BUILD_CLI)
+    add_executable(appalchemist-cli
+        src/cli/main.cpp
+        src/cli/cli_converter.cpp
+        include/cli_converter.h
+    )
+
+    target_include_directories(appalchemist-cli PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/cli
+    )
+
+    target_compile_definitions(appalchemist-cli PRIVATE
+        APPALCHEMIST_VERSION="${PROJECT_VERSION}"
+    )
+
+    target_link_libraries(appalchemist-cli PRIVATE
+        appalchemist_core
+        Qt6::Core
+    )
+
+    if(NOT MSVC)
+        target_compile_options(appalchemist-cli PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    if(ENABLE_SANITIZERS)
+        target_compile_options(appalchemist-cli PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(appalchemist-cli PUBLIC -fsanitize=address,undefined)
+    endif()
+
+    install(TARGETS appalchemist-cli RUNTIME DESTINATION bin)
+endif()
+
+# ----------------------------------------------------------------------------
+# GTK4 GUI Target: appalchemist-gui
+# ----------------------------------------------------------------------------
+if(BUILD_GUI)
+    pkg_check_modules(GTK_FRONTEND REQUIRED IMPORTED_TARGET gtk4>=4.10 libadwaita-1>=1.5)
+
+    add_executable(appalchemist-gui
         frontend/gtk/main.cpp
         frontend/gtk/app.cpp
         frontend/gtk/app.h
         frontend/gtk/app_window.cpp
         frontend/gtk/app_window.h
-        src/cli_converter.cpp
-        include/cli_converter.h
     )
 
-    target_include_directories(appalchemist
-        PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/frontend/gtk
+    target_include_directories(appalchemist-gui PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/frontend/gtk
     )
 
-    target_compile_definitions(appalchemist
-        PRIVATE
-            APPALCHEMIST_VERSION="${PROJECT_VERSION}"
-            APPALCHEMIST_GTK_STYLE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/frontend/gtk/style.css"
+    target_compile_definitions(appalchemist-gui PRIVATE
+        APPALCHEMIST_VERSION="${PROJECT_VERSION}"
+        APPALCHEMIST_GTK_STYLE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/frontend/gtk/style.css"
     )
 
-    target_link_libraries(appalchemist
-        PRIVATE
-            appalchemist_backend
-            PkgConfig::GTK_FRONTEND
-            Qt6::Core
+    target_link_libraries(appalchemist-gui PRIVATE
+        appalchemist_core
+        PkgConfig::GTK_FRONTEND
+        Qt6::Core
     )
-else()
-    message(FATAL_ERROR "GTK4 >= 4.10 and libadwaita >= 1.5 are required for this build")
+
+    if(NOT MSVC)
+        target_compile_options(appalchemist-gui PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    if(ENABLE_SANITIZERS)
+        target_compile_options(appalchemist-gui PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(appalchemist-gui PUBLIC -fsanitize=address,undefined)
+    endif()
+
+    install(TARGETS appalchemist-gui RUNTIME DESTINATION bin)
+
+    # Install desktop files
+    install(FILES packaging/appalchemist.desktop
+        DESTINATION share/applications
+    )
+    install(FILES packaging/appalchemist-deb-handler.desktop
+        DESTINATION share/applications
+    )
+    install(FILES packaging/appalchemist-rpm-handler.desktop
+        DESTINATION share/applications
+    )
 endif()
 
-# Install
-install(TARGETS appalchemist
-    RUNTIME DESTINATION bin
-)
-
-# Install desktop file
-install(FILES packaging/appalchemist.desktop
-    DESTINATION share/applications
-)
-
-# Install desktop file handlers
-install(FILES packaging/appalchemist-deb-handler.desktop
-    DESTINATION share/applications
-)
-
-install(FILES packaging/appalchemist-rpm-handler.desktop
-    DESTINATION share/applications
-)
-
-
-# Install icon if available
+# ----------------------------------------------------------------------------
+# Common Assets & Resources Installation
+# ----------------------------------------------------------------------------
 if(EXISTS "${CMAKE_SOURCE_DIR}/assets/icons/appalchemist.png")
     install(FILES assets/icons/appalchemist.png
         DESTINATION share/pixmaps
         RENAME appalchemist.png
     )
-    # Install to hicolor theme
     foreach(SIZE 16 32 48 64 128 256)
         install(FILES assets/icons/appalchemist.png
             DESTINATION share/icons/hicolor/${SIZE}x${SIZE}/apps
@@ -169,7 +238,6 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/assets/icons/appalchemist.png")
     endforeach()
 endif()
 
-# Install MIME type files
 install(FILES packaging/mime/deb-package.xml
     DESTINATION share/mime/packages
 )
@@ -178,7 +246,6 @@ install(FILES packaging/mime/rpm-package.xml
     DESTINATION share/mime/packages
 )
 
-# Install bundled appimagetool if available
 if(EXISTS "${CMAKE_SOURCE_DIR}/thirdparty/appimagetool")
     install(PROGRAMS thirdparty/appimagetool
         DESTINATION lib/appalchemist
@@ -186,16 +253,10 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/thirdparty/appimagetool")
     )
 endif()
 
-# Tests. Enable with -DBUILD_TESTING=ON (off by default so normal/AppImage
-# builds are unaffected). Run with `ctest` from the build directory.
-option(BUILD_TESTING "Build unit tests" OFF)
-if(BUILD_TESTING)
+# ----------------------------------------------------------------------------
+# Testing Configuration: Catch2 v3 + CTest
+# ----------------------------------------------------------------------------
+if(ENABLE_TESTS)
     enable_testing()
-    add_executable(appalchemist_tests tests/backend_tests.cpp)
-    target_link_libraries(appalchemist_tests PRIVATE appalchemist_backend Qt6::Core)
-    if(LIBARCHIVE_FOUND)
-        target_link_libraries(appalchemist_tests PRIVATE PkgConfig::LIBARCHIVE)
-        target_compile_definitions(appalchemist_tests PRIVATE HAVE_LIBARCHIVE)
-    endif()
-    add_test(NAME backend_tests COMMAND appalchemist_tests)
+    add_subdirectory(tests)
 endif()
