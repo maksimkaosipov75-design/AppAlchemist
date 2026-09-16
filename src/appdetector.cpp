@@ -9,6 +9,12 @@ AppInfo AppDetector::detectApp(const QString& appDirPath,
                                const QString& extractedDebDir,
                                const QString& mainExecutable,
                                const PackageMetadata& metadata) {
+    // Detection works from the staged AppDir and the executable itself; the
+    // extraction directory and package metadata are part of the stable
+    // signature but not consulted here.
+    Q_UNUSED(extractedDebDir);
+    Q_UNUSED(metadata);
+
     AppInfo info;
     info.type = AppType::Unknown;
     info.needsSandbox = false;

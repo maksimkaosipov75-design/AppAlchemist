@@ -1904,3 +1904,38 @@ TEST_CASE("Empirical Stress: ConversionController batch cancellation queue halt"
     REQUIRE(controller.currentPipeline() == nullptr);
 }
 
+
+TEST_CASE("Package names handed to package managers are option-safe (SEC-HIGH-11)",
+          "[security][subprocess][argument-injection]") {
+    SECTION("ordinary distribution package names are accepted") {
+        REQUIRE(SubprocessWrapper::isSafePackageName("libc6"));
+        REQUIRE(SubprocessWrapper::isSafePackageName("libgtk-4-1"));
+        REQUIRE(SubprocessWrapper::isSafePackageName("g++-12"));
+        REQUIRE(SubprocessWrapper::isSafePackageName("python3.11"));
+        REQUIRE(SubprocessWrapper::isSafePackageName("libstdc++6"));
+        REQUIRE(SubprocessWrapper::isSafePackageName("zlib1g"));
+    }
+
+    SECTION("names that a package manager would parse as options are rejected") {
+        REQUIRE_FALSE(SubprocessWrapper::isSafePackageName("-o"));
+        REQUIRE_FALSE(SubprocessWrapper::isSafePackageName("--config-file=/tmp/evil"));
+        REQUIRE_FALSE(SubprocessWrapper::isSafePackageName("-oDir::Cache=/tmp"));
+        REQUIRE_FALSE(SubprocessWrapper::isSafePackageName("--installroot=/"));
+    }
+
+    SECTION("names carrying shell metacharacters or separators are rejected") {
+        REQUIRE_FALSE(SubprocessWrapper::isSafePackageName("libc6; rm -rf /"));
+        REQUIRE_FALSE(SubprocessWrapper::isSafePackageName("libc6$(id)"));
+        REQUIRE_FALSE(SubprocessWrapper::isSafePackageName("libc6`id`"));
+        REQUIRE_FALSE(SubprocessWrapper::isSafePackageName("../../etc/passwd"));
+        REQUIRE_FALSE(SubprocessWrapper::isSafePackageName("/usr/bin/evil"));
+        REQUIRE_FALSE(SubprocessWrapper::isSafePackageName("lib c6"));
+        REQUIRE_FALSE(SubprocessWrapper::isSafePackageName("libc6\nrm"));
+    }
+
+    SECTION("empty, blank and oversized names are rejected") {
+        REQUIRE_FALSE(SubprocessWrapper::isSafePackageName(""));
+        REQUIRE_FALSE(SubprocessWrapper::isSafePackageName("   "));
+        REQUIRE_FALSE(SubprocessWrapper::isSafePackageName(QString("a").repeated(256)));
+    }
+}

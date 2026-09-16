@@ -228,11 +228,21 @@ static void test_repeated_batch_cancellations(const QString& tarPath, const QStr
 // ---------------------------------------------------------------------------
 // TEST 4: No temporary directories left behind after all runs
 // ---------------------------------------------------------------------------
-static void test_no_stranded_tmp_dirs() {
-    EMP_TEST("No orphaned /tmp/appalchemist-* directories remaining");
+static QStringList listTempWorkDirs() {
     QDir tmpDir(QDir::tempPath());
-    QStringList remaining = tmpDir.entryList({"appalchemist-*"}, QDir::Dirs | QDir::NoDotAndDotDot);
-    EMP_ASSERT(remaining.isEmpty(), 
+    return tmpDir.entryList({"appalchemist-*"}, QDir::Dirs | QDir::NoDotAndDotDot);
+}
+
+// `preexisting` is captured before the run: any conversion started by another
+// process (a real conversion, a parallel CTest job) owns its own temporary
+// directory, and counting those would fail this test for unrelated reasons.
+static void test_no_stranded_tmp_dirs(const QStringList& preexisting) {
+    EMP_TEST("No orphaned /tmp/appalchemist-* directories remaining");
+    QStringList remaining = listTempWorkDirs();
+    for (const QString& existing : preexisting) {
+        remaining.removeAll(existing);
+    }
+    EMP_ASSERT(remaining.isEmpty(),
                QString("Temporary directory count remaining in /tmp: %1 (expected 0)").arg(remaining.size()).toStdString().c_str());
     if (!remaining.isEmpty()) {
         std::cerr << "  Stranded directories: " << remaining.join(", ").toStdString() << std::endl;
@@ -254,10 +264,12 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    const QStringList preexistingTempDirs = listTempWorkDirs();
+
     test_repeated_controller_cancellation_runs(tarPath, fixtureDir.path());
     test_repeated_controller_runs_to_completion(tarPath, fixtureDir.path());
     test_repeated_batch_cancellations(tarPath, fixtureDir.path());
-    test_no_stranded_tmp_dirs();
+    test_no_stranded_tmp_dirs(preexistingTempDirs);
 
     std::cout << "\n========================================" << std::endl;
     std::cout << "SUMMARY: " << g_passCount << " passed, " << g_failCount << " failed." << std::endl;

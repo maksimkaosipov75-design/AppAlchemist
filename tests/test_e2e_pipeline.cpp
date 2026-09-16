@@ -57,6 +57,95 @@ TEST_CASE("AppDirBuilder: AppRun template generation and syntax check", "[appdir
     REQUIRE(appRunContent.contains("${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"));
 }
 
+TEST_CASE("AppRun exposes Qt plugin and QML paths shipped inside the package",
+          "[appdir][apprun][qt]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+    const QString appDirPath = tempDir.path();
+
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/bin"));
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/lib"));
+    // A Qt application that ships its own runtime keeps the platform plugins
+    // and QML modules next to it instead of in usr/lib.
+    REQUIRE(QDir().mkpath(appDirPath + "/opt/sample-app/lib/plugins/platforms"));
+    REQUIRE(QDir().mkpath(appDirPath + "/opt/sample-app/lib/qml/QtQuick/Controls"));
+
+    const QString dummyBin = appDirPath + "/usr/bin/sample-app";
+    REQUIRE(TestHelpers::createSampleElf(dummyBin));
+    REQUIRE(TestHelpers::createSampleElf(appDirPath + "/opt/sample-app/lib/plugins/platforms/libqxcb.so"));
+
+    PackageMetadata meta;
+    meta.package = "sample-app";
+    meta.mainExecutable = "usr/bin/sample-app";
+    meta.executables = {"usr/bin/sample-app"};
+
+    AppDirBuilder builder;
+    REQUIRE(builder.createAppRun(appDirPath, meta));
+
+    QFile appRun(appDirPath + "/AppRun");
+    REQUIRE(appRun.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QString content = appRun.readAll();
+    appRun.close();
+
+    SECTION("platform plugins are reachable") {
+        REQUIRE(content.contains("QT_PLUGIN_PATH"));
+        REQUIRE(content.contains("opt/sample-app/lib/plugins"));
+        REQUIRE(content.contains("QT_QPA_PLATFORM_PLUGIN_PATH"));
+    }
+
+    SECTION("QML modules are reachable") {
+        REQUIRE(content.contains("QML2_IMPORT_PATH"));
+        REQUIRE(content.contains("QML_IMPORT_PATH"));
+        REQUIRE(content.contains("opt/sample-app/lib/qml"));
+    }
+
+    SECTION("existing values are preserved without leading colons") {
+        REQUIRE(content.contains("${QT_PLUGIN_PATH:+:${QT_PLUGIN_PATH}}"));
+        REQUIRE(content.contains("${QML2_IMPORT_PATH:+:${QML2_IMPORT_PATH}}"));
+        REQUIRE_FALSE(content.contains(":${QT_PLUGIN_PATH}\""));
+    }
+
+    SECTION("the generated script still parses") {
+        QProcess syntaxCheck;
+        syntaxCheck.start("bash", {"-n", appDirPath + "/AppRun"});
+        REQUIRE(syntaxCheck.waitForFinished(3000));
+        REQUIRE(syntaxCheck.exitCode() == 0);
+    }
+}
+
+TEST_CASE("Library bundling prefers package-provided libraries over host copies",
+          "[deps][bundling]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+    const QString appDirPath = tempDir.path();
+
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/bin"));
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/lib"));
+    REQUIRE(QDir().mkpath(appDirPath + "/opt/sample-app/lib"));
+
+    REQUIRE(TestHelpers::createSampleElf(appDirPath + "/usr/bin/sample-app"));
+    // The package ships its own libsample.so.1 ...
+    REQUIRE(TestHelpers::createSampleElf(appDirPath + "/opt/sample-app/lib/libsample.so.1"));
+    // ... while an earlier staging step left a host copy and a soname symlink
+    // whose target was never copied in.
+    REQUIRE(TestHelpers::createSampleElf(appDirPath + "/usr/lib/libsample.so.1"));
+    REQUIRE(QFile::link("libdangling.so.2.1", appDirPath + "/usr/lib/libdangling.so.2"));
+
+    DependencyResolver resolver;
+    const LibraryBundleReport report = resolver.bundleSystemLibraries(appDirPath);
+    REQUIRE(report.ran);
+
+    SECTION("the host copy no longer shadows the package's own library") {
+        REQUIRE_FALSE(QFileInfo::exists(appDirPath + "/usr/lib/libsample.so.1"));
+        REQUIRE(QFileInfo::exists(appDirPath + "/opt/sample-app/lib/libsample.so.1"));
+    }
+
+    SECTION("symlinks that resolve to nothing are not shipped") {
+        const QFileInfo dangling(appDirPath + "/usr/lib/libdangling.so.2");
+        REQUIRE_FALSE((dangling.isSymLink() && !dangling.exists()));
+    }
+}
+
 TEST_CASE("Cross-Feature: RPM dependency extraction into AppDir usr/lib", "[rpm][deps][appdir]") {
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());

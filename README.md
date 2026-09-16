@@ -69,7 +69,7 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./appalchemist-1.5.0-x86_64.AppImage
 ## GUI Usage
 
 ```bash
-./build/appalchemist
+./build/appalchemist-gui
 ```
 
 The main GUI flow is:
@@ -84,18 +84,45 @@ More details: [docs/usage-gui.md](docs/usage-gui.md).
 
 ## CLI Usage
 
+`appalchemist-cli` is a standalone headless binary: it links only against the
+core conversion library and has no GTK, libadwaita or Qt GUI dependency, so it
+runs on servers and inside CI containers.
+
 ```bash
-./build/appalchemist --convert ./example.deb --output ./dist --no-launch
+./build/appalchemist-cli ./example.deb --output ./dist --no-launch
 ```
 
 Useful commands:
 
 ```bash
-./build/appalchemist --help
-./build/appalchemist --version
-./build/appalchemist --convert ./example.rpm --output ./dist
-./build/appalchemist --convert ./example.tar.gz --no-launch
-./build/appalchemist --batch ./one.deb ./two.rpm ./three.tar.gz --output ./dist --no-launch
+./build/appalchemist-cli --help
+./build/appalchemist-cli --version
+./build/appalchemist-cli --convert ./example.rpm --output ./dist
+./build/appalchemist-cli --dry-run ./example.deb            # validate only
+./build/appalchemist-cli --json ./example.deb -o ./dist     # NDJSON events
+./build/appalchemist-cli --quiet ./example.deb -o ./dist    # nothing on stdout
+./build/appalchemist-cli --batch ./one.deb ./two.rpm --output ./dist --no-launch
+```
+
+### Automation contract
+
+| Aspect | Behaviour |
+|---|---|
+| `stdout` | The generated AppImage path; with `--json`, one NDJSON event per line; with `--quiet`, nothing at all |
+| `stderr` | All logs, warnings and error messages |
+| exit `0` | Conversion succeeded (or `--dry-run` validation passed) |
+| exit `1` | Conversion failed (bad package, extraction or build error) |
+| exit `2` | Usage error (unknown option, no input file) |
+
+`--dry-run` validates the package and resolves its dependencies without
+building an AppDir or invoking `appimagetool`, which makes it usable as a cheap
+pre-flight check in pipelines.
+
+NDJSON events look like this:
+
+```json
+{"event":"progress","message":"Extracting .deb package...","percent":20,"percentage":20}
+{"event":"complete","output":"/dist/Example.AppImage","success":true}
 ```
 
 More details: [docs/usage-cli.md](docs/usage-cli.md).
@@ -125,11 +152,11 @@ bash packaging/build-rpm.sh
 
 Requirements:
 
-- CMake 3.15+
+- CMake 3.22+
 - C++20 compiler
-- Qt6 Core, Network, Xml and Sql development packages
-- GTK4 and libadwaita development packages
-- libarchive development package (for in-process RPM/archive extraction)
+- Qt6 Core and Network development packages
+- GTK4 (>= 4.10) and libadwaita (>= 1.5) development packages (GUI only)
+- libarchive and libzstd development packages (in-process archive extraction)
 - `pkg-config`
 - standard packaging utilities available on your distro
 
@@ -140,21 +167,49 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
+The build produces three targets:
+
+| Target | Kind | Notes |
+|---|---|---|
+| `appalchemist_core` | static library | Conversion pipeline, no GUI dependencies |
+| `appalchemist-cli` | executable | Headless converter, no GTK dependencies |
+| `appalchemist-gui` | executable | GTK4/libadwaita frontend |
+
+Build options: `-DBUILD_CLI=OFF`, `-DBUILD_GUI=OFF`, `-DENABLE_TESTS=OFF`,
+`-DENABLE_SANITIZERS=ON` (AddressSanitizer + UndefinedBehaviorSanitizer).
+Building only the CLI on a headless machine needs no GTK at all:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=OFF
+```
+
 Run:
 
 ```bash
-./build/appalchemist
+./build/appalchemist-gui       # graphical interface
+./build/appalchemist-cli --help
 ```
 
 ## Tests
 
-Unit tests cover the package-parsing and extraction logic (RPM header parsing,
-dependency normalization, and path-traversal protection during extraction):
+The Catch2 v3 suite covers package parsing, extraction security (path
+traversal, hardlink/symlink escapes, decompression quotas), dependency
+staging, AppDir assembly, the CLI contract, and an end-to-end pipeline run.
+Standalone stress harnesses for AppRun sanitization and conversion
+cancellation run as part of the same CTest suite:
 
 ```bash
-cmake -S . -B build -DBUILD_TESTING=ON
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
+```
+
+The same suite under AddressSanitizer and UndefinedBehaviorSanitizer:
+
+```bash
+cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DENABLE_SANITIZERS=ON
+cmake --build build-asan -j$(nproc)
+ctest --test-dir build-asan --output-on-failure
 ```
 
 CI (`.github/workflows/ci.yml`) runs these tests and a real RPM-to-AppImage
@@ -166,6 +221,7 @@ conversion smoke test on every push and pull request.
 
 - Confirm the input package is valid.
 - Retry from the CLI with `--no-launch` so conversion is isolated from app startup.
+- Run `appalchemist-cli --dry-run <package>` to check whether the package itself parses and resolves.
 - Check the conversion log for missing libraries, missing launchers, or AppDir layout problems.
 - Report reproducible failures with the conversion failure issue template.
 

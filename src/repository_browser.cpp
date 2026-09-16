@@ -1,5 +1,6 @@
 #include "repository_browser.h"
 #include "repository_search_worker.h"
+#include "utils.h"
 
 #include <QDir>
 #include <QProcess>
@@ -374,10 +375,15 @@ QList<PackageInfo> RepositoryBrowser::searchZypper(const QString& query, bool si
 }
 
 bool RepositoryBrowser::downloadApt(const PackageInfo& package, const QString& outputDir) {
+    if (!SubprocessWrapper::isSafePackageName(package.name)) {
+        emit log(QString("Refusing to download package with unsafe name: %1").arg(package.name));
+        return false;
+    }
+
     QProcess process;
     const QString aptProgram = QFile::exists("/usr/bin/apt") ? QStringLiteral("/usr/bin/apt") : QStringLiteral("apt");
     process.setProgram(aptProgram);
-    process.setArguments({"download", package.name});
+    process.setArguments({"download", "--", package.name});
     process.setWorkingDirectory(outputDir);
     process.start();
     process.waitForFinished(180000);
@@ -385,9 +391,14 @@ bool RepositoryBrowser::downloadApt(const PackageInfo& package, const QString& o
 }
 
 bool RepositoryBrowser::downloadDnf(const PackageInfo& package, const QString& outputDir) {
+    if (!SubprocessWrapper::isSafePackageName(package.name)) {
+        emit log(QString("Refusing to download package with unsafe name: %1").arg(package.name));
+        return false;
+    }
+
     QProcess process;
     process.setProgram("dnf");
-    process.setArguments({"download", "--destdir", outputDir, package.name});
+    process.setArguments({"download", "--destdir", outputDir, "--", package.name});
     process.start();
     process.waitForFinished(300000);
     return process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;

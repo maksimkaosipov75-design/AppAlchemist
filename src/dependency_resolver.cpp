@@ -7,6 +7,7 @@
 #include <QRegularExpression>
 #include <QStandardPaths>
 #include <QDirIterator>
+#include <QHash>
 #include <QQueue>
 #include <QDebug>
 #include <QEventLoop>
@@ -204,6 +205,38 @@ bool parseLddLine(const QString& rawLine, QString& soname, QString& resolvedPath
 }
 
 // Relative path expressed for an RPATH $ORIGIN entry, e.g. "../lib".
+// Resolves a bare soname (e.g. "libgnutls.so.30") to a real file on the host,
+// following symlinks so the versioned target is returned rather than a link.
+QString resolveHostLibrary(const QString& soname) {
+    static const QStringList searchPaths = {
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib/aarch64-linux-gnu",
+        "/usr/lib64",
+        "/usr/lib",
+        "/lib/x86_64-linux-gnu",
+        "/lib64",
+        "/lib"
+    };
+
+    const QString fileName = QFileInfo(soname).fileName();
+    if (fileName.isEmpty()) {
+        return QString();
+    }
+
+    for (const QString& dir : searchPaths) {
+        const QFileInfo candidate(QDir(dir).absoluteFilePath(fileName));
+        if (!candidate.exists()) {
+            continue;
+        }
+        const QString canonical = candidate.canonicalFilePath();
+        if (!canonical.isEmpty()) {
+            return canonical;
+        }
+    }
+
+    return QString();
+}
+
 QString originRelativePath(const QString& fromDir, const QString& toDir) {
     const QString relative = QDir(fromDir).relativeFilePath(toDir);
     if (relative.isEmpty() || relative == ".") {
@@ -580,6 +613,63 @@ LibraryBundleReport DependencyResolver::bundleSystemLibraries(const QString& app
     QStringList bundledPaths;
     QSet<QString> hostLibraryDirs;
 
+    // Libraries the package ships in a private directory (for example
+    // usr/lib/<app>/lib/libfoo.so). ldd cannot resolve them because the
+    // executable was staged away from its original location and its
+    // $ORIGIN-relative RPATH no longer points at them, so index them by file
+    // name and re-attach the directory through RPATH further down.
+    QHash<QString, QString> appDirLibraryIndex;
+    {
+        QDirIterator libIt(appDirPath, {"*.so", "*.so.*"}, QDir::Files,
+                           QDirIterator::Subdirectories);
+        while (libIt.hasNext()) {
+            const QString candidate = libIt.next();
+            const QString dir = QFileInfo(candidate).absolutePath();
+            // usr/lib is where this routine puts host libraries; only entries
+            // outside it belong to the package itself.
+            if (dir == lib64Dir || dir == lib32Dir) {
+                continue;
+            }
+            const QString name = QFileInfo(candidate).fileName();
+            if (!appDirLibraryIndex.contains(name)) {
+                appDirLibraryIndex.insert(name, candidate);
+            }
+        }
+    }
+
+    // binary -> extra directories that must end up on its RPATH.
+    QHash<QString, QSet<QString>> privateRpathDirs;
+
+    // Directories that hold a package-provided library which also exists as a
+    // host copy in usr/lib. Every patched binary gets them ahead of usr/lib so
+    // the package's own runtime wins.
+    QStringList packageRuntimeDirs;
+    {
+        QStringList privateDirs;
+        for (auto it = appDirLibraryIndex.constBegin(); it != appDirLibraryIndex.constEnd(); ++it) {
+            const QString dir = QFileInfo(it.value()).absolutePath();
+            if (!privateDirs.contains(dir)) {
+                privateDirs << dir;
+            }
+
+            // A host copy of the same soname staged into usr/lib would be found
+            // first and is usually older than the one the package was built
+            // against, so remove it and rely on the package's own library.
+            const QString shadowing = QDir(lib64Dir).absoluteFilePath(it.key());
+            if (QFileInfo::exists(shadowing) && QFile::remove(shadowing)) {
+                emit log(QString("  using package-provided %1, removed host copy from usr/lib").arg(it.key()));
+                if (!packageRuntimeDirs.contains(dir)) {
+                    packageRuntimeDirs << dir;
+                }
+            }
+        }
+        packageRuntimeDirs.sort();
+        if (!privateDirs.isEmpty()) {
+            privateDirs.sort();
+            env.insert("LD_LIBRARY_PATH", (privateDirs + ldPath).join(":"));
+        }
+    }
+
     // Pass 0 walks the dependency graph of the packaged binaries. Between the
     // passes we pull in the loadable-module trees of whatever got bundled, and
     // pass 1 resolves the dependencies of those modules.
@@ -611,6 +701,17 @@ LibraryBundleReport DependencyResolver::bundleSystemLibraries(const QString& app
                 }
 
                 if (notFound) {
+                    const QString shipped = appDirLibraryIndex.value(QFileInfo(soname).fileName());
+                    if (!shipped.isEmpty()) {
+                        // Shipped by the package itself: keep it where it is and
+                        // make the binary look for it there.
+                        privateRpathDirs[binary].insert(QFileInfo(shipped).absolutePath());
+                        if (!queued.contains(shipped)) {
+                            queued.insert(shipped);
+                            pending.enqueue(shipped);
+                        }
+                        continue;
+                    }
                     unresolvedSonames.insert(soname);
                     continue;
                 }
@@ -623,6 +724,40 @@ LibraryBundleReport DependencyResolver::bundleSystemLibraries(const QString& app
 
                 // Already provided from inside the AppDir.
                 if (!canonicalAppDir.isEmpty() && canonicalHostPath.startsWith(canonicalAppDir + "/")) {
+                    const QString providerDir = QFileInfo(canonicalHostPath).absolutePath();
+                    if (providerDir != lib64Dir && providerDir != lib32Dir) {
+                        // Shipped by the package in a private directory. Record
+                        // it for the RPATH pass and make sure no host copy in
+                        // usr/lib shadows it at runtime: the package was built
+                        // against its own version, which is frequently newer
+                        // than anything installed on the build host.
+                        privateRpathDirs[binary].insert(providerDir);
+                        const QString shadowing =
+                            QDir(lib64Dir).absoluteFilePath(QFileInfo(soname).fileName());
+                        if (QFileInfo::exists(shadowing) && shadowing != canonicalHostPath) {
+                            if (QFile::remove(shadowing)) {
+                                emit log(QString("  using package-provided %1, removed host copy").arg(soname));
+                                report.bundled.removeAll(soname);
+                            }
+                        }
+                        if (!queued.contains(canonicalHostPath)) {
+                            queued.insert(canonicalHostPath);
+                            pending.enqueue(canonicalHostPath);
+                        }
+                    }
+                    continue;
+                }
+
+                // The package ships its own copy of this soname (typically a
+                // private runtime under opt/<app>/lib) but ldd still resolved
+                // it against the host, so prefer the shipped one.
+                const QString shippedByPackage = appDirLibraryIndex.value(QFileInfo(soname).fileName());
+                if (!shippedByPackage.isEmpty()) {
+                    privateRpathDirs[binary].insert(QFileInfo(shippedByPackage).absolutePath());
+                    if (!queued.contains(shippedByPackage)) {
+                        queued.insert(shippedByPackage);
+                        pending.enqueue(shippedByPackage);
+                    }
                     continue;
                 }
 
@@ -631,12 +766,30 @@ LibraryBundleReport DependencyResolver::bundleSystemLibraries(const QString& app
                 }
                 handledSonames.insert(soname);
 
+                // Never re-introduce a host copy of a library the package
+                // provides itself; it was deliberately removed from usr/lib.
+                if (appDirLibraryIndex.contains(QFileInfo(soname).fileName())) {
+                    continue;
+                }
+
                 const int elfClass = elfClassOf(canonicalHostPath);
                 const QString targetDir = (elfClass == 32) ? lib32Dir : lib64Dir;
                 QDir().mkpath(targetDir);
 
                 const QString destination = QDir(targetDir).absoluteFilePath(QFileInfo(soname).fileName());
-                if (QFileInfo::exists(destination)) {
+                const QFileInfo destinationInfo(destination);
+                if (destinationInfo.exists()) {
+                    continue;
+                }
+
+                // An earlier staging step may have recreated a soname symlink
+                // (libfoo.so.1 -> libfoo.so.1.2.3) without copying its target.
+                // Such a link resolves to nothing, shadows the library at
+                // runtime and makes QFile::copy() fail because the name is
+                // already taken, so drop it and place the real file instead.
+                if (destinationInfo.isSymLink() && !QFile::remove(destination)) {
+                    emit log(QString("  WARNING: could not replace broken symlink %1").arg(destination));
+                    unresolvedSonames.insert(soname);
                     continue;
                 }
 
@@ -676,6 +829,61 @@ LibraryBundleReport DependencyResolver::bundleSystemLibraries(const QString& app
         }
     }
 
+    // Final sweep: any symlink left in the library directories that does not
+    // resolve would break the AppImage on a host that lacks the library, which
+    // is exactly what bundling is meant to prevent. Fill it from the host when
+    // possible, otherwise remove it and report the soname as unresolved.
+    for (const QString& libDir : {lib64Dir, lib32Dir}) {
+        QDir dir(libDir);
+        if (!dir.exists()) {
+            continue;
+        }
+        const QFileInfoList entries = dir.entryInfoList(QDir::Files | QDir::System | QDir::NoDotAndDotDot);
+        for (const QFileInfo& entry : entries) {
+            if (!entry.isSymLink() || entry.exists()) {
+                continue;
+            }
+
+            const QString brokenPath = entry.absoluteFilePath();
+            const QString soname = entry.fileName();
+            if (!QFile::remove(brokenPath)) {
+                emit log(QString("  WARNING: could not remove broken symlink %1").arg(brokenPath));
+                continue;
+            }
+
+            // If the package ships this library itself, the broken link was the
+            // only thing standing in the way: the binaries reach the real file
+            // through the RPATH entries added below.
+            const QString shipped = appDirLibraryIndex.value(soname);
+            if (!shipped.isEmpty()) {
+                const QString shippedDir = QFileInfo(shipped).absolutePath();
+                if (!packageRuntimeDirs.contains(shippedDir)) {
+                    packageRuntimeDirs << shippedDir;
+                    packageRuntimeDirs.sort();
+                }
+                emit log(QString("  using package-provided %1").arg(soname));
+                continue;
+            }
+
+            const QString hostPath = resolveHostLibrary(soname);
+
+            if (hostPath.isEmpty() || !QFile::copy(hostPath, brokenPath)) {
+                emit log(QString("  removed broken library symlink: %1").arg(soname));
+                unresolvedSonames.insert(soname);
+                continue;
+            }
+
+            QFile::setPermissions(brokenPath,
+                                  QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner |
+                                  QFile::ReadGroup | QFile::ExeGroup |
+                                  QFile::ReadOther | QFile::ExeOther);
+            if (!report.bundled.contains(soname)) {
+                report.bundled << soname;
+            }
+            emit log(QString("  replaced broken symlink with host library: %1").arg(soname));
+        }
+    }
+
     report.unresolved = unresolvedSonames.values();
     report.unresolved.sort();
     report.bundled.sort();
@@ -686,7 +894,26 @@ LibraryBundleReport DependencyResolver::bundleSystemLibraries(const QString& app
     if (report.patchelfAvailable) {
         for (const QString& binary : queued) {
             const QString binaryDir = QFileInfo(binary).absolutePath();
-            QStringList wanted = {originRelativePath(binaryDir, lib64Dir)};
+
+            // Package-provided runtimes first: their host counterparts were
+            // removed from usr/lib, and they are what the binaries were built
+            // against.
+            QStringList wanted;
+            QStringList preferredDirs = packageRuntimeDirs;
+            const QSet<QString> binaryPrivateDirs = privateRpathDirs.value(binary);
+            for (const QString& privateDir : binaryPrivateDirs) {
+                if (!preferredDirs.contains(privateDir)) {
+                    preferredDirs << privateDir;
+                }
+            }
+            for (const QString& preferred : preferredDirs) {
+                const QString relative = originRelativePath(binaryDir, preferred);
+                if (!wanted.contains(relative)) {
+                    wanted << relative;
+                }
+            }
+
+            wanted << originRelativePath(binaryDir, lib64Dir);
             if (QDir(lib32Dir).exists()) {
                 wanted << originRelativePath(binaryDir, lib32Dir);
             }
@@ -976,6 +1203,14 @@ QList<ResolvedDependency> DependencyResolver::resolveDependencies(const QStringL
 
 bool DependencyResolver::downloadAndExtract(const QString& packageName, const QString& outputDir) {
     emit log(QString("  Downloading: %1").arg(packageName));
+
+    // SEC-HIGH-11: package names originate from untrusted Depends:/Requires:
+    // metadata and are passed straight to a package manager, so reject
+    // anything that could be parsed as an option before spawning it.
+    if (!SubprocessWrapper::isSafePackageName(packageName)) {
+        emit log(QString("  Refusing to download package with unsafe name: %1").arg(packageName));
+        return false;
+    }
     
     // Create temp directory for download
     QString tempDir = SubprocessWrapper::createTemporaryDirectory("appalchemist-deps");
@@ -990,12 +1225,12 @@ bool DependencyResolver::downloadAndExtract(const QString& packageName, const QS
     
     switch (pm) {
         case PackageManager::APT:
-            result = SubprocessWrapper::execute("apt-get", 
-                {"download", packageName}, tempDir, 120000);
+            result = SubprocessWrapper::execute("apt-get",
+                {"download", "--", packageName}, tempDir, 120000);
             break;
         case PackageManager::DNF:
-            result = SubprocessWrapper::execute("dnf", 
-                {"download", "--destdir", tempDir, packageName}, {}, 120000);
+            result = SubprocessWrapper::execute("dnf",
+                {"download", "--destdir", tempDir, "--", packageName}, {}, 120000);
             break;
         case PackageManager::PACMAN:
             if (!m_sudoPassword.isEmpty()) {
@@ -1003,7 +1238,7 @@ bool DependencyResolver::downloadAndExtract(const QString& packageName, const QS
                 SubprocessWrapper::executeWithSudo("pacman", {"-Fy"}, m_sudoPassword, {}, 60000);
                 // Download package to cache
                 result = SubprocessWrapper::executeWithSudo("pacman",
-                    {"-Syw", "--noconfirm", packageName}, m_sudoPassword, {}, 120000);
+                    {"-Syw", "--noconfirm", "--", packageName}, m_sudoPassword, {}, 120000);
                 if (result.success) {
                     // Copy from cache to tempDir (may need sudo)
                     QDir cacheDir("/var/cache/pacman/pkg");

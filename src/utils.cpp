@@ -445,6 +445,17 @@ bool SubprocessWrapper::setExecutable(const QString& filePath) {
     return file.setPermissions(perms);
 }
 
+bool SubprocessWrapper::isSafePackageName(const QString& name) {
+    const QString trimmed = name.trimmed();
+    if (trimmed.isEmpty() || trimmed.size() > 255) {
+        return false;
+    }
+    // Must start alphanumerically so it can never be read as an option, and
+    // may only contain characters used by Debian/RPM/Arch package names.
+    static const QRegularExpression pattern(QStringLiteral("^[A-Za-z0-9][A-Za-z0-9+._-]*$"));
+    return pattern.match(trimmed).hasMatch();
+}
+
 bool SubprocessWrapper::createHardLink(const QString& source, const QString& destination) {
     QFileInfo sourceInfo(source);
     if (!sourceInfo.exists() || !sourceInfo.isFile()) {
