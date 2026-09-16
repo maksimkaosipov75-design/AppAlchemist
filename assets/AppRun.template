@@ -1,0 +1,12 @@
+#!/bin/bash
+HERE="$(dirname "$(readlink -f "${0}")")"
+
+# Set up environment
+export PATH="${HERE}/@PATH_DIRS@${PATH:+:${PATH}}"
+
+# Set library paths (order matters - bundled libs first)
+export LD_LIBRARY_PATH="${HERE}/@LIB_DIRS@${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+
+# Set XDG directories
+export XDG_DATA_DIRS="${HERE}/usr/share${XDG_DATA_DIRS:+:${XDG_DATA_DIRS}}"
+export XDG_CONFIG_DIRS="${HERE}/etc/xdg${XDG_CONFIG_DIRS:+:${XDG_CONFIG_DIRS}}"

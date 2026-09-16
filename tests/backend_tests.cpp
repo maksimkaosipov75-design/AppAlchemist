@@ -204,10 +204,9 @@ static void test_zip_slip() {
     QString err;
     const bool ok = ArchiveExtractor::extractSecure(tarPath, dest, &err);
 
-    // The legitimate file extracts, so the call succeeds overall...
-    CHECK(ok, "extraction of safe entry succeeds");
-    CHECK(QFile::exists(dest + "/safe/inside.txt"), "safe file extracted inside dest");
-    // ...but the traversal entry must NOT have escaped into the parent dir.
+    // Modern security requirements: archives with traversal entries must be REJECTED.
+    CHECK(!ok, "archive with traversal entry is rejected");
+    // Traversal entry must NOT have escaped into parent or beside dest.
     CHECK(!QFile::exists(base.filePath("escaped.txt")), "path traversal entry blocked");
     CHECK(!QFile::exists(dest + "/../escaped.txt"), "no escaped file beside dest");
 }

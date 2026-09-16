@@ -6,8 +6,33 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
+#include <QStandardPaths>
 
 namespace {
+
+bool verifyElfHeader(const QString& binaryPath, QString* errorDetail = nullptr) {
+    QFile file(binaryPath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        if (errorDetail) *errorDetail = QString("Cannot open binary for inspection: %1").arg(binaryPath);
+        return false;
+    }
+    const QByteArray header = file.read(4);
+    file.close();
+    if (header == "\x7f\x45\x4c\x46") {
+        QString readelfCmd = QStandardPaths::findExecutable("readelf");
+        if (readelfCmd.isEmpty()) {
+            readelfCmd = QStandardPaths::findExecutable("llvm-readelf");
+        }
+        if (!readelfCmd.isEmpty()) {
+            ProcessResult res = SubprocessWrapper::execute(readelfCmd, {"-h", binaryPath}, {}, 5000);
+            if (!res.success) {
+                if (errorDetail) *errorDetail = QString("readelf -h failed on %1: %2").arg(binaryPath, res.stderrOutput);
+                return false;
+            }
+        }
+    }
+    return true;
+}
 
 struct ProbeCommand {
     QString program;
@@ -469,10 +494,19 @@ QString RuntimeProbeResult::summary() const {
     return parts.join(" | ");
 }
 
+void RuntimeProbePolicy::setAllowHostExecution(bool allow) {
+    s_allowHostExecution = allow;
+}
+
+bool RuntimeProbePolicy::allowHostExecution() {
+    return s_allowHostExecution;
+}
+
 RuntimeProbeResult RuntimeProbePolicy::probe(const QString& appDirPath,
                                              const PackageProfile& profile,
                                              const PackageMetadata& metadata,
-                                             const QString& primaryExecutable) {
+                                             const QString& primaryExecutable,
+                                             bool allowHostExecution) {
     RuntimeProbeResult result;
     result.profileName = PackageClassifier::applicationProfileToString(profile.applicationProfile);
 
@@ -512,6 +546,38 @@ RuntimeProbeResult RuntimeProbePolicy::probe(const QString& appDirPath,
         return result;
     }
 
+    // SEC-HIGH-20: Disallow active host execution of untrusted binaries by default.
+    // Confine verification to static inspection (readelf -h, bash -n, profile file checks).
+    const bool allowExec = allowHostExecution || s_allowHostExecution;
+    if (!allowExec) {
+        QString targetElf;
+        if (!primaryExecutable.isEmpty()) {
+            targetElf = resolveAppDirPath(appDirPath, primaryExecutable);
+        }
+        if (targetElf.isEmpty() || !QFileInfo::exists(targetElf)) {
+            targetElf = resolveAppDirPath(appDirPath, metadata.mainExecutable);
+        }
+        if (targetElf.isEmpty() || !QFileInfo::exists(targetElf)) {
+            targetElf = appRunPath;
+        }
+
+        if (QFileInfo::exists(targetElf)) {
+            QString elfError;
+            if (!verifyElfHeader(targetElf, &elfError)) {
+                result.fileChecksPassed = false;
+                result.failures << QString("Static ELF header verification failed: %1").arg(elfError);
+                result.success = false;
+                return result;
+            }
+            result.checks << QString("Static ELF header verification passed via readelf -h: %1").arg(QFileInfo(targetElf).fileName());
+        }
+
+        result.commandExecuted = false;
+        result.success = true;
+        result.warnings << "Active runtime probe skipped (untrusted host execution disallowed; static verification passed).";
+        return result;
+    }
+
     const ProbeCommand command = buildProbeCommand(appDirPath,
                                                    profile,
                                                    appRunPath,
@@ -530,11 +596,52 @@ RuntimeProbeResult RuntimeProbePolicy::probe(const QString& appDirPath,
     }
 
     const QProcessEnvironment env = buildProbeEnvironment(appDirPath, javaBinary, pythonInterpreter);
-    const ProcessResult processResult = SubprocessWrapper::execute(command.program,
-                                                                   command.arguments,
-                                                                   command.workingDirectory,
-                                                                   command.timeoutMs,
-                                                                   env);
+    ProcessResult processResult;
+    const QString bwrapPath = QStandardPaths::findExecutable("bwrap");
+    if (!bwrapPath.isEmpty()) {
+        QStringList bwrapArgs = {
+            "--unshare-all",
+            "--ro-bind", "/", "/",
+            "--dev", "/dev",
+            "--proc", "/proc",
+            "--tmpfs", "/tmp"
+        };
+
+        // If appDirPath or workingDirectory is under /tmp/ or /var/tmp/, bind mount it
+        // so bwrap can chdir to the target working directory inside the container.
+        const QString absAppDirPath = QFileInfo(appDirPath).absoluteFilePath();
+        if (absAppDirPath.startsWith("/tmp/") || absAppDirPath.startsWith("/var/tmp/")) {
+            bwrapArgs << "--bind" << absAppDirPath << absAppDirPath;
+        }
+        if (!command.workingDirectory.isEmpty()) {
+            const QString absWorkDir = QFileInfo(command.workingDirectory).absoluteFilePath();
+            if ((absWorkDir.startsWith("/tmp/") || absWorkDir.startsWith("/var/tmp/")) && absWorkDir != absAppDirPath) {
+                bwrapArgs << "--bind" << absWorkDir << absWorkDir;
+            }
+        }
+        if (!command.program.isEmpty()) {
+            const QString absProg = QFileInfo(command.program).absoluteFilePath();
+            if ((absProg.startsWith("/tmp/") || absProg.startsWith("/var/tmp/")) &&
+                !absProg.startsWith(absAppDirPath) &&
+                (command.workingDirectory.isEmpty() || !absProg.startsWith(QFileInfo(command.workingDirectory).absoluteFilePath()))) {
+                bwrapArgs << "--bind" << absProg << absProg;
+            }
+        }
+
+        bwrapArgs << "--" << command.program;
+        bwrapArgs << command.arguments;
+        processResult = SubprocessWrapper::execute(bwrapPath,
+                                                   bwrapArgs,
+                                                   command.workingDirectory,
+                                                   command.timeoutMs,
+                                                   env);
+    } else {
+        processResult = SubprocessWrapper::execute(command.program,
+                                                   command.arguments,
+                                                   command.workingDirectory,
+                                                   command.timeoutMs,
+                                                   env);
+    }
     result.commandExecuted = true;
     result.exitCode = processResult.exitCode;
     result.stdoutOutput = shortenOutput(processResult.stdoutOutput);

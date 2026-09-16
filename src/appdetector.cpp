@@ -447,8 +447,8 @@ QString AppDetector::replaceScriptPaths(const QString& scriptContent,
                   R"(\1=\2:-${HERE}/usr/lib/)");
     
     // Replace cp commands with absolute paths
-    result.replace(QRegularExpression(R"(cp\s+/usr/lib/)"), "cp \"${HERE}/usr/lib/");
-    result.replace(QRegularExpression(R"(cp\s+/opt/)"), "cp \"${HERE}/opt/");
+    result.replace(QRegularExpression(R"(cp\s+/usr/lib/)"), "cp ${HERE}/usr/lib/");
+    result.replace(QRegularExpression(R"(cp\s+/opt/)"), "cp ${HERE}/opt/");
     
     return result;
 }
@@ -546,3 +546,89 @@ QString AppDetector::findElectronBinary(const QString& fullBaseDirPath) {
     
     return QString();
 }
+
+QString AppDetector::normalizeArchitecture(const QString& arch) {
+    QString trimmed = arch.trimmed().toLower();
+    if (trimmed == "amd64" || trimmed == "x86_64" || trimmed == "x64") {
+        return "x86_64";
+    }
+    if (trimmed == "arm64" || trimmed == "aarch64") {
+        return "aarch64";
+    }
+    if (trimmed == "armhf" || trimmed == "armv7l" || trimmed == "armv7") {
+        return "armhf";
+    }
+    if (trimmed == "i386" || trimmed == "i486" || trimmed == "i586" || trimmed == "i686" || trimmed == "x86") {
+        return "i686";
+    }
+    if (trimmed == "all" || trimmed == "noarch" || trimmed == "any") {
+        return "all";
+    }
+    return trimmed;
+}
+
+bool AppDetector::isValidArchitecture(const QString& arch) {
+    static const QSet<QString> standardArchs = {
+        "x86_64", "aarch64", "armhf", "i686", "all"
+    };
+    return standardArchs.contains(normalizeArchitecture(arch));
+}
+
+QString AppDetector::findIcon(const QString& extractDir) {
+    QStringList baseDirs;
+    if (QDir(QString("%1/data").arg(extractDir)).exists()) {
+        baseDirs << QString("%1/data").arg(extractDir);
+    }
+    baseDirs << extractDir;
+
+    QStringList iconSearchDirs;
+    for (const QString& base : baseDirs) {
+        iconSearchDirs << QString("%1/usr/share/pixmaps").arg(base)
+                       << QString("%1/usr/share/icons/hicolor/256x256/apps").arg(base)
+                       << QString("%1/usr/share/icons/hicolor/scalable/apps").arg(base)
+                       << QString("%1/usr/share/icons/hicolor/128x128/apps").arg(base)
+                       << QString("%1/usr/share/icons/hicolor/64x64/apps").arg(base)
+                       << QString("%1/usr/share/icons/hicolor/48x48/apps").arg(base)
+                       << QString("%1/usr/share/icons/hicolor/32x32/apps").arg(base)
+                       << QString("%1/usr/share/icons/hicolor/16x16/apps").arg(base)
+                       << QString("%1/usr/share/icons").arg(base)
+                       << QString("%1/opt").arg(base)
+                       << base;
+    }
+
+    for (const QString& dirPath : iconSearchDirs) {
+        QDir dir(dirPath);
+        if (!dir.exists()) continue;
+        QStringList icons = dir.entryList({"*.png", "*.svg", "*.xpm", "*.ico"}, QDir::Files);
+        if (!icons.isEmpty()) {
+            return dir.absoluteFilePath(icons.first());
+        }
+    }
+    return QString();
+}
+
+QString AppDetector::findDesktopFile(const QString& extractDir) {
+    QStringList baseDirs;
+    if (QDir(QString("%1/data").arg(extractDir)).exists()) {
+        baseDirs << QString("%1/data").arg(extractDir);
+    }
+    baseDirs << extractDir;
+
+    QStringList desktopSearchDirs;
+    for (const QString& base : baseDirs) {
+        desktopSearchDirs << QString("%1/usr/share/applications").arg(base)
+                          << QString("%1/usr/local/share/applications").arg(base)
+                          << base;
+    }
+
+    for (const QString& dirPath : desktopSearchDirs) {
+        QDir dir(dirPath);
+        if (!dir.exists()) continue;
+        QStringList des = dir.entryList({"*.desktop"}, QDir::Files);
+        if (!des.isEmpty()) {
+            return dir.absoluteFilePath(des.first());
+        }
+    }
+    return QString();
+}
+

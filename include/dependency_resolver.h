@@ -5,6 +5,7 @@
 #include <QString>
 #include <QStringList>
 #include <QSet>
+#include <QProcessEnvironment>
 #include "repository_browser.h"
 
 // Dependency resolution settings
@@ -80,6 +81,9 @@ public:
     // Set sudo password for pacman operations
     void setSudoPassword(const QString& password) { m_sudoPassword = password; }
 
+    // Safely executes ldd inside a bubblewrap sandbox or falls back to passive readelf -d DT_NEEDED parsing.
+    static QStringList runSafeLdd(const QString& binaryPath, const QProcessEnvironment& env = QProcessEnvironment());
+
 signals:
     void log(const QString& message);
     void progress(int current, int total);
@@ -116,9 +120,6 @@ private:
     // Download a package and extract libraries
     bool downloadAndExtract(const QString& packageName, const QString& outputDir);
     
-    // Extract libraries from downloaded package
-    QStringList extractLibraries(const QString& packagePath, const QString& outputDir);
-    
     // Parse version constraint from dependency string
     void parseVersionConstraint(const QString& dep, QString& name, QString& version, QString& op);
     
@@ -129,6 +130,9 @@ private:
     QStringList findMissingLibraries(const QString& binaryPath);
     
 public:
+    // Extract libraries from downloaded package
+    QStringList extractLibraries(const QString& packagePath, const QString& outputDir);
+
     // Resolve missing libraries by downloading their packages
     bool resolveMissingLibraries(const QString& binaryPath, const QString& appDir);
 };

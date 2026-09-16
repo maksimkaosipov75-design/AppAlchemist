@@ -31,10 +31,17 @@ struct RuntimeProbeResult {
 
 class RuntimeProbePolicy {
 public:
+    static void setAllowHostExecution(bool allow);
+    static bool allowHostExecution();
+
     static RuntimeProbeResult probe(const QString& appDirPath,
                                     const PackageProfile& profile,
                                     const PackageMetadata& metadata,
-                                    const QString& primaryExecutable);
+                                    const QString& primaryExecutable,
+                                    bool allowHostExecution = false);
+
+private:
+    static inline bool s_allowHostExecution = false;
 };
 
 #endif // RUNTIME_PROBE_H

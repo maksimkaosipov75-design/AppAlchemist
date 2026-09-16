@@ -13,6 +13,17 @@
 #include "cache_manager.h"
 #include "utils.h"
 
+struct CliOptions {
+    QString packagePath;
+    QStringList batchPaths;
+    QString outputDir;
+    bool json = false;
+    bool quiet = false;
+    bool dryRun = false;
+    bool autoLaunch = false;
+    bool isBatch = false;
+};
+
 class CliConverter : public QObject {
     Q_OBJECT
 
@@ -22,11 +33,15 @@ public:
     
     // Convert package to AppImage
     // Returns exit code: 0 on success, 1 on error
-    int convert(const QString& packagePath, const QString& outputDir = QString(), bool autoLaunch = true);
+    int convert(const CliOptions& options);
+    int convert(const QString& packagePath, const QString& outputDir = QString(), bool autoLaunch = true,
+                bool json = false, bool quiet = false, bool dryRun = false);
     
     // Batch convert multiple packages
     // Returns exit code: 0 if all succeeded, 1 if any failed
-    int convertBatch(const QStringList& packagePaths, const QString& outputDir = QString(), bool autoLaunch = false);
+    int convertBatch(const CliOptions& options);
+    int convertBatch(const QStringList& packagePaths, const QString& outputDir = QString(), bool autoLaunch = false,
+                     bool json = false, bool quiet = false, bool dryRun = false);
     
     // Send system notification
     static void sendNotification(const QString& title, const QString& message, const QString& urgency = "normal");
@@ -55,8 +70,12 @@ private:
     QString m_packagePath;
     QString m_outputDir;
     bool m_autoLaunch;
+    bool m_json = false;
+    bool m_quiet = false;
+    bool m_dryRun = false;
     bool m_success;
     QString m_resultAppImagePath;
+    QString m_lastError;
     qint64 m_conversionStartTime;
 };
 

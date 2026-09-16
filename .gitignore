@@ -1,6 +1,7 @@
 # Build directories
 build/
 build-*/
+build_*/
 build.cache-backup-*/
 packaging/arch/pkg/
 packaging/arch/src/
@@ -52,7 +53,5 @@ Thumbs.db
 *.tmp
 *.log
 
-
-
-
-
+# Agent orchestration workspaces
+.agents/

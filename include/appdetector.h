@@ -69,7 +69,15 @@ public:
     
     // Find Electron binary location
     static QString findElectronBinary(const QString& baseDir);
-    
+
+    // Architecture normalization and validation (REL-LOW-51)
+    static bool isValidArchitecture(const QString& arch);
+    static QString normalizeArchitecture(const QString& arch);
+
+    // Search for icon and desktop file across extraction root and data/ subpath (REL-MED-22)
+    static QString findIcon(const QString& extractDir);
+    static QString findDesktopFile(const QString& extractDir);
+
 private:
     // Check for Electron indicators
     static bool hasElectronIndicators(const QString& dirPath);

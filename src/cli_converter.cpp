@@ -13,6 +13,9 @@
 #include <QRegularExpressionMatch>
 #include <QTextStream>
 #include <QVector>
+#include <QJsonObject>
+#include <QJsonDocument>
+#include <iostream>
 #include <algorithm>
 #include <limits>
 
@@ -255,59 +258,100 @@ void CliConverter::sendNotification(const QString& title, const QString& message
     SubprocessWrapper::execute("notify-send", args, {}, 5000);
 }
 
-int CliConverter::convert(const QString& packagePath, const QString& outputDir, bool autoLaunch) {
+int CliConverter::convert(const CliOptions& options) {
     cleanupPipelineObjects();
 
     QElapsedTimer timer;
     timer.start();
     
-    m_packagePath = packagePath;
-    m_outputDir = outputDir;
-    m_autoLaunch = autoLaunch;
+    m_packagePath = options.packagePath;
+    m_outputDir = options.outputDir;
+    m_autoLaunch = options.autoLaunch;
+    m_json = options.json;
+    m_quiet = options.quiet;
+    m_dryRun = options.dryRun;
     m_success = false;
+    m_lastError.clear();
     m_resultAppImagePath.clear();
     
-    QFileInfo packageInfo(packagePath);
-    if (!packageInfo.exists()) {
-        QString errorMsg = QString("Package file not found: %1").arg(packagePath);
+    QFileInfo packageInfo(m_packagePath);
+    if (m_packagePath.isEmpty() || !packageInfo.exists()) {
+        QString errorMsg = m_packagePath.isEmpty() ? "No package file specified" : QString("Package file not found: %1").arg(m_packagePath);
+        m_lastError = errorMsg;
         logToFile("ERROR: " + errorMsg);
-        sendNotification("AppAlchemist Error", errorMsg, "error");
+        if (m_json) {
+            QJsonObject errObj;
+            errObj["event"] = "error";
+            errObj["message"] = errorMsg;
+            std::cout << QJsonDocument(errObj).toJson(QJsonDocument::Compact).toStdString() << "\n";
+            QJsonObject compObj;
+            compObj["event"] = "complete";
+            compObj["success"] = false;
+            compObj["error"] = errorMsg;
+            compObj["dry_run"] = m_dryRun;
+            std::cout << QJsonDocument(compObj).toJson(QJsonDocument::Compact).toStdString() << "\n";
+            std::cout.flush();
+        }
+        std::cerr << "Error: " << errorMsg.toStdString() << "\n";
+        if (!m_quiet && !m_json) {
+            sendNotification("AppAlchemist Error", errorMsg, "error");
+        }
         return 1;
     }
     
-    logToFile(QString("Starting conversion: %1").arg(packagePath));
-    sendNotification("AppAlchemist", QString("Converting %1...").arg(packageInfo.fileName()), "normal");
+    logToFile(QString("Starting conversion: %1").arg(m_packagePath));
+    if (!m_quiet && !m_json) {
+        sendNotification("AppAlchemist", QString("Converting %1...").arg(packageInfo.fileName()), "normal");
+    }
     
-    // Check cache first
-    QString cachedAppImage = CacheManager::getValidCachedAppImage(packagePath);
-    if (!cachedAppImage.isEmpty()) {
-        logToFile(QString("Using cached AppImage: %1").arg(cachedAppImage));
-        const CachedConversionMetadata metadata = CacheManager::getConversionMetadata(packagePath);
-        if (metadata.isValid()) {
-            logToFile(QString("Cache metadata matched package hash: %1").arg(metadata.packageHash));
-        } else {
-            logToFile("Cache hit used legacy file/mtime validation (no matching metadata record).");
-        }
-        sendNotification("AppAlchemist", QString("Using cached AppImage for %1").arg(packageInfo.fileName()), "normal");
-        
-        m_resultAppImagePath = cachedAppImage;
-        m_success = true;
-        
-        // Always create desktop entry for cached AppImage too
-        createDesktopEntry(cachedAppImage);
-        
-        if (m_autoLaunch) {
-            if (launchAppImage(cachedAppImage)) {
-                return 0;
+    // Check cache first (skip in dry-run mode)
+    if (!m_dryRun) {
+        QString cachedAppImage = CacheManager::getValidCachedAppImage(m_packagePath);
+        if (!cachedAppImage.isEmpty()) {
+            logToFile(QString("Using cached AppImage: %1").arg(cachedAppImage));
+            const CachedConversionMetadata metadata = CacheManager::getConversionMetadata(m_packagePath);
+            if (metadata.isValid()) {
+                logToFile(QString("Cache metadata matched package hash: %1").arg(metadata.packageHash));
             } else {
-                return 1;
+                logToFile("Cache hit used legacy file/mtime validation (no matching metadata record).");
             }
+            if (!m_quiet && !m_json) {
+                sendNotification("AppAlchemist", QString("Using cached AppImage for %1").arg(packageInfo.fileName()), "normal");
+            }
+            
+            m_resultAppImagePath = cachedAppImage;
+            m_success = true;
+            
+            if (m_json) {
+                QJsonObject compObj;
+                compObj["event"] = "complete";
+                compObj["success"] = true;
+                compObj["output"] = cachedAppImage;
+                compObj["cached"] = true;
+                compObj["dry_run"] = false;
+                std::cout << QJsonDocument(compObj).toJson(QJsonDocument::Compact).toStdString() << "\n";
+                std::cout.flush();
+            } else if (!m_quiet) {
+                std::cout << cachedAppImage.toStdString() << "\n";
+                std::cout.flush();
+            }
+            
+            if (!m_json && !m_dryRun) {
+                createDesktopEntry(cachedAppImage);
+                if (m_autoLaunch) {
+                    if (launchAppImage(cachedAppImage)) {
+                        return 0;
+                    } else {
+                        return 1;
+                    }
+                }
+            }
+            return 0;
         }
-        return 0;
     }
     
     // Determine output path
-    QString appImagePath = determineAppImagePath(packagePath, outputDir);
+    QString appImagePath = determineAppImagePath(m_packagePath, m_outputDir);
     
     // Create pipeline in separate thread
     m_pipelineThread = new QThread(this);
@@ -315,7 +359,6 @@ int CliConverter::convert(const QString& packagePath, const QString& outputDir, 
     m_pipeline->moveToThread(m_pipelineThread);
     
     connect(m_pipelineThread, &QThread::started, m_pipeline, &PackageToAppImagePipeline::start);
-    // Use QueuedConnection for cross-thread signals to ensure proper delivery
     connect(m_pipeline, &PackageToAppImagePipeline::progress, this, &CliConverter::onProgress, Qt::QueuedConnection);
     connect(m_pipeline, &PackageToAppImagePipeline::log, this, &CliConverter::onLog, Qt::QueuedConnection);
     connect(m_pipeline, &PackageToAppImagePipeline::error, this, &CliConverter::onError, Qt::QueuedConnection);
@@ -329,14 +372,10 @@ int CliConverter::convert(const QString& packagePath, const QString& outputDir, 
         m_pipelineThread = nullptr;
     });
     
-    // Set paths
-    m_pipeline->setPackagePath(packagePath);
+    m_pipeline->setPackagePath(m_packagePath);
     m_pipeline->setOutputPath(appImagePath);
+    m_pipeline->setDryRun(m_dryRun);
     
-    // The CLI path is what the .deb/.rpm file handlers invoke, so it must use
-    // the same defaults as the GUI: bundle host libraries into the AppDir, and
-    // strip/compress the result. Repository downloads stay off because this
-    // path is non-interactive and cannot prompt for a sudo password.
     DependencySettings dependencySettings;
     dependencySettings.bundleSystemLibraries = true;
     dependencySettings.enabled = false;
@@ -346,108 +385,91 @@ int CliConverter::convert(const QString& packagePath, const QString& outputDir, 
     optimizationSettings.enabled = true;
     m_pipeline->setOptimizationSettings(optimizationSettings);
     
-    // Start conversion
-    m_pipelineThread->start();
-    
-    // Wait for completion (blocking)
-    // Use QEventLoop to process events properly while waiting
+    // Start conversion and wait for completion cleanly via QEventLoop
     QEventLoop loop;
     QMetaObject::Connection conn = connect(m_pipelineThread, &QThread::finished, &loop, &QEventLoop::quit);
-    
-    // Process events until thread finishes
-    int waitCount = 0;
-    while (m_pipelineThread->isRunning()) {
-        loop.processEvents(QEventLoop::AllEvents, 100);
-        QThread::msleep(10); // Small delay to allow signal processing
-        waitCount++;
-        if (waitCount > 1000) { // Timeout after ~10 seconds
-            logToFile("WARNING: Thread still running after timeout, forcing wait");
-            break;
-        }
-        // Double check in case signal was missed
-        if (!m_pipelineThread->isRunning()) {
-            break;
-        }
-    }
-    
-    // Disconnect and ensure thread is really finished
+    m_pipelineThread->start();
+    loop.exec();
     disconnect(conn);
-    if (m_pipelineThread->isRunning()) {
-        logToFile("Thread still running, waiting up to 5 seconds...");
-        m_pipelineThread->wait(5000); // Wait up to 5 seconds
+    
+    if (m_pipelineThread && m_pipelineThread->isRunning()) {
+        m_pipelineThread->wait(5000);
     }
     
-    // Process all pending events multiple times to ensure signals are handled
-    // Use the main event loop to process queued signals
-    logToFile("Processing pending events...");
-    for (int i = 0; i < 30; ++i) {
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 200);
-        QThread::msleep(50); // Small delay between event processing
-    }
+    // Process remaining queued events
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
     
     logToFile(QString("Pipeline finished. success=%1, autoLaunch=%2, appImagePath='%3'")
               .arg(m_success).arg(m_autoLaunch).arg(m_resultAppImagePath));
     
-    // Force check: if we have a result path but success is false, check if file exists
-    if (!m_success && !m_resultAppImagePath.isEmpty()) {
-        QFileInfo resultInfo(m_resultAppImagePath);
-        if (resultInfo.exists()) {
-            logToFile("WARNING: m_success is false but AppImage exists, setting success=true");
-            m_success = true;
-        }
-    }
-    
-    // Additional check: if onSuccess was called but we missed it
-    if (!m_success && !m_resultAppImagePath.isEmpty()) {
-        logToFile("Double-checking: AppImage path is set but success is false");
-        QFileInfo resultInfo(m_resultAppImagePath);
-        if (resultInfo.exists() && resultInfo.size() > 0) {
-            logToFile("AppImage exists and has size, setting success=true");
-            m_success = true;
-        }
-    }
-    
     if (m_success && !m_resultAppImagePath.isEmpty()) {
         qint64 elapsed = timer.elapsed();
-        logToFile(QString("Conversion successful in %1 ms. autoLaunch=%2, appImagePath='%3'").arg(elapsed).arg(m_autoLaunch).arg(m_resultAppImagePath));
+        logToFile(QString("Conversion successful in %1 ms. autoLaunch=%2, appImagePath='%3'")
+                  .arg(elapsed).arg(m_autoLaunch).arg(m_resultAppImagePath));
         
-        // Create desktop entry synchronously to ensure it's done before returning
-        createDesktopEntry(m_resultAppImagePath);
-        
-        // Always try to launch if autoLaunch is enabled
-        if (m_autoLaunch) {
-            logToFile("Attempting to launch AppImage...");
-            // Use a small delay to ensure AppImage file is fully written
-            QThread::msleep(500);
-            if (launchAppImage(m_resultAppImagePath)) {
-                logToFile("AppImage launched successfully");
-                // Play sound notification for fast conversions
-                if (elapsed < 2000) {
-                    SubprocessWrapper::execute("paplay", {"/usr/share/sounds/freedesktop/stereo/complete.oga"}, {}, 1000);
+        if (!m_dryRun && !m_json) {
+            createDesktopEntry(m_resultAppImagePath);
+            if (m_autoLaunch) {
+                logToFile("Attempting to launch AppImage...");
+                QThread::msleep(500);
+                if (launchAppImage(m_resultAppImagePath)) {
+                    logToFile("AppImage launched successfully");
+                    if (!m_quiet && elapsed < 2000) {
+                        SubprocessWrapper::execute("paplay", {"/usr/share/sounds/freedesktop/stereo/complete.oga"}, {}, 1000);
+                    }
+                    return 0;
+                } else {
+                    logToFile("Failed to launch AppImage, but conversion was successful");
+                    return 0;
                 }
-                return 0;
             } else {
-                logToFile("Failed to launch AppImage, but conversion was successful");
-                // Don't return error code if conversion succeeded
-                return 0;
+                logToFile("Auto-launch disabled (--no-launch flag)");
             }
-        } else {
-            logToFile("Auto-launch disabled (--no-launch flag)");
         }
         return 0;
     }
     
     if (!m_success) {
         logToFile("Conversion failed or was cancelled");
+        if (m_json) {
+            QJsonObject obj;
+            obj["event"] = "complete";
+            obj["success"] = false;
+            obj["error"] = m_lastError.isEmpty() ? "Conversion failed" : m_lastError;
+            obj["dry_run"] = m_dryRun;
+            std::cout << QJsonDocument(obj).toJson(QJsonDocument::Compact).toStdString() << "\n";
+            std::cout.flush();
+        }
         return 1;
     }
     
     if (m_resultAppImagePath.isEmpty()) {
         logToFile("WARNING: AppImage path is empty, cannot launch");
+        if (m_json) {
+            QJsonObject obj;
+            obj["event"] = "complete";
+            obj["success"] = false;
+            obj["error"] = "AppImage path is empty";
+            obj["dry_run"] = m_dryRun;
+            std::cout << QJsonDocument(obj).toJson(QJsonDocument::Compact).toStdString() << "\n";
+            std::cout.flush();
+        }
         return 1;
     }
     
     return 0;
+}
+
+int CliConverter::convert(const QString& packagePath, const QString& outputDir, bool autoLaunch,
+                          bool json, bool quiet, bool dryRun) {
+    CliOptions opts;
+    opts.packagePath = packagePath;
+    opts.outputDir = outputDir;
+    opts.autoLaunch = autoLaunch;
+    opts.json = json;
+    opts.quiet = quiet;
+    opts.dryRun = dryRun;
+    return convert(opts);
 }
 
 QString CliConverter::determineAppImagePath(const QString& packagePath, const QString& customOutputDir) {
@@ -461,29 +483,46 @@ QString CliConverter::determineAppImagePath(const QString& packagePath, const QS
     return CacheManager::getAppImagePath(packagePath);
 }
 
-int CliConverter::convertBatch(const QStringList& packagePaths, const QString& outputDir, bool autoLaunch) {
-    if (packagePaths.isEmpty()) {
-        logToFile("ERROR: No packages provided for batch conversion");
+int CliConverter::convertBatch(const CliOptions& options) {
+    if (options.batchPaths.isEmpty()) {
+        QString errorMsg = "No packages provided for batch conversion";
+        logToFile("ERROR: " + errorMsg);
+        std::cerr << "Error: " << errorMsg.toStdString() << "\n";
+        if (options.json) {
+            QJsonObject obj;
+            obj["event"] = "complete";
+            obj["success"] = false;
+            obj["error"] = errorMsg;
+            std::cout << QJsonDocument(obj).toJson(QJsonDocument::Compact).toStdString() << "\n";
+            std::cout.flush();
+        }
         return 1;
     }
     
-    logToFile(QString("=== Starting batch conversion of %1 packages ===").arg(packagePaths.size()));
-    sendNotification("AppAlchemist", QString("Starting batch conversion of %1 packages...").arg(packagePaths.size()), "normal");
+    logToFile(QString("=== Starting batch conversion of %1 packages ===").arg(options.batchPaths.size()));
+    if (!options.quiet && !options.json) {
+        sendNotification("AppAlchemist", QString("Starting batch conversion of %1 packages...").arg(options.batchPaths.size()), "normal");
+    }
     
     int successCount = 0;
     int failCount = 0;
     QStringList successfulPaths;
     QStringList failedPaths;
     
-    for (int i = 0; i < packagePaths.size(); ++i) {
-        const QString& packagePath = packagePaths[i];
+    for (int i = 0; i < options.batchPaths.size(); ++i) {
+        const QString& packagePath = options.batchPaths[i];
         QFileInfo info(packagePath);
         
         logToFile(QString("=== [%1/%2] Converting: %3 ===")
-            .arg(i + 1).arg(packagePaths.size()).arg(info.fileName()));
+            .arg(i + 1).arg(options.batchPaths.size()).arg(info.fileName()));
         
-        // Don't auto-launch during batch - launch all at the end or not at all
-        int result = convert(packagePath, outputDir, false);
+        CliOptions itemOpts = options;
+        itemOpts.packagePath = packagePath;
+        itemOpts.batchPaths.clear();
+        itemOpts.isBatch = false;
+        itemOpts.autoLaunch = false; // Don't auto-launch during batch
+        
+        int result = convert(itemOpts);
         
         if (result == 0) {
             successCount++;
@@ -502,22 +541,24 @@ int CliConverter::convertBatch(const QStringList& packagePaths, const QString& o
         .arg(successCount).arg(failCount));
     
     // Send summary notification
-    if (failCount == 0) {
-        sendNotification("AppAlchemist", 
-            QString("Batch complete: All %1 packages converted successfully").arg(successCount), 
-            "normal");
-    } else if (successCount == 0) {
-        sendNotification("AppAlchemist Error", 
-            QString("Batch failed: All %1 packages failed to convert").arg(failCount), 
-            "error");
-    } else {
-        sendNotification("AppAlchemist", 
-            QString("Batch complete: %1 succeeded, %2 failed").arg(successCount).arg(failCount), 
-            "normal");
+    if (!options.quiet && !options.json) {
+        if (failCount == 0) {
+            sendNotification("AppAlchemist", 
+                QString("Batch complete: All %1 packages converted successfully").arg(successCount), 
+                "normal");
+        } else if (successCount == 0) {
+            sendNotification("AppAlchemist Error", 
+                QString("Batch failed: All %1 packages failed to convert").arg(failCount), 
+                "error");
+        } else {
+            sendNotification("AppAlchemist", 
+                QString("Batch complete: %1 succeeded, %2 failed").arg(successCount).arg(failCount), 
+                "normal");
+        }
     }
     
     // Launch successfully converted AppImages if requested
-    if (autoLaunch && !successfulPaths.isEmpty()) {
+    if (options.autoLaunch && !successfulPaths.isEmpty() && !options.dryRun && !options.json) {
         logToFile(QString("Launching %1 converted AppImages...").arg(successfulPaths.size()));
         for (const QString& appImagePath : successfulPaths) {
             launchAppImage(appImagePath);
@@ -528,34 +569,86 @@ int CliConverter::convertBatch(const QStringList& packagePaths, const QString& o
     return (failCount > 0) ? 1 : 0;
 }
 
+int CliConverter::convertBatch(const QStringList& packagePaths, const QString& outputDir, bool autoLaunch,
+                               bool json, bool quiet, bool dryRun) {
+    CliOptions opts;
+    opts.batchPaths = packagePaths;
+    opts.outputDir = outputDir;
+    opts.autoLaunch = autoLaunch;
+    opts.json = json;
+    opts.quiet = quiet;
+    opts.dryRun = dryRun;
+    opts.isBatch = true;
+    return convertBatch(opts);
+}
+
 void CliConverter::onProgress(int percentage, const QString& message) {
     QString logMsg = QString("[%1%] %2").arg(percentage).arg(message);
     logToFile(logMsg);
-    // Don't spam notifications for every progress update
+    if (m_json) {
+        QJsonObject obj;
+        obj["event"] = "progress";
+        obj["percent"] = percentage;
+        obj["percentage"] = percentage;
+        obj["message"] = message;
+        std::cout << QJsonDocument(obj).toJson(QJsonDocument::Compact).toStdString() << "\n";
+        std::cout.flush();
+    } else if (!m_quiet) {
+        std::cerr << QString("[%1%] %2\n").arg(percentage).arg(message).toStdString();
+    }
 }
 
 void CliConverter::onLog(const QString& message) {
     logToFile(message);
+    if (!m_quiet && !m_json) {
+        std::cerr << message.toStdString() << "\n";
+    }
 }
 
 void CliConverter::onError(const QString& errorMessage) {
-    logToFile("ERROR: " + errorMessage);
-    sendNotification("AppAlchemist Error", errorMessage, "error");
+    m_lastError = errorMessage;
     m_success = false;
+    logToFile("ERROR: " + errorMessage);
+    if (!m_quiet && !m_json) {
+        sendNotification("AppAlchemist Error", errorMessage, "error");
+    }
+    if (m_json) {
+        QJsonObject obj;
+        obj["event"] = "error";
+        obj["message"] = errorMessage;
+        std::cout << QJsonDocument(obj).toJson(QJsonDocument::Compact).toStdString() << "\n";
+        std::cout.flush();
+    }
+    std::cerr << "Error: " << errorMessage.toStdString() << "\n";
 }
 
 void CliConverter::onSuccess(const QString& appImagePath) {
     logToFile(QString("SUCCESS: AppImage created at %1").arg(appImagePath));
-    if (CacheManager::storeConversionMetadata(m_packagePath, appImagePath)) {
-        logToFile(QString("Stored conversion cache metadata for package: %1").arg(m_packagePath));
-    } else {
-        logToFile(QString("WARNING: Failed to store conversion cache metadata for package: %1").arg(m_packagePath));
+    if (!m_dryRun) {
+        if (CacheManager::storeConversionMetadata(m_packagePath, appImagePath)) {
+            logToFile(QString("Stored conversion cache metadata for package: %1").arg(m_packagePath));
+        } else {
+            logToFile(QString("WARNING: Failed to store conversion cache metadata for package: %1").arg(m_packagePath));
+        }
     }
-    sendNotification("AppAlchemist", QString("Successfully converted to AppImage"), "normal");
-    // Set success flag and path immediately
+    if (!m_quiet && !m_json) {
+        sendNotification("AppAlchemist", QString("Successfully converted to AppImage"), "normal");
+    }
     m_success = true;
     m_resultAppImagePath = appImagePath;
     logToFile(QString("onSuccess: Set m_success=true, m_resultAppImagePath='%1'").arg(appImagePath));
+    if (m_json) {
+        QJsonObject obj;
+        obj["event"] = "complete";
+        obj["success"] = true;
+        obj["output"] = appImagePath;
+        obj["dry_run"] = m_dryRun;
+        std::cout << QJsonDocument(obj).toJson(QJsonDocument::Compact).toStdString() << "\n";
+        std::cout.flush();
+    } else if (!m_quiet) {
+        std::cout << appImagePath.toStdString() << "\n";
+        std::cout.flush();
+    }
 }
 
 void CliConverter::onPipelineFinished() {
@@ -574,11 +667,12 @@ void CliConverter::createDesktopEntry(const QString& appImagePath) {
         tempDirObj.mkpath(".");
     }
     
-    // Extract AppImage
-    QString extractCommand = QString("\"%1\" --appimage-extract").arg(appImagePath);
+    // Extract AppImage directly without shell interpolation (SEC-CRIT-02)
     QProcess extractProcess;
     extractProcess.setWorkingDirectory(tempDir);
-    extractProcess.start("/bin/sh", QStringList() << "-c" << extractCommand);
+    extractProcess.setProgram(appImagePath);
+    extractProcess.setArguments({"--appimage-extract"});
+    extractProcess.start();
     if (!extractProcess.waitForFinished(30000)) {
         logToFile("WARNING: Failed to extract AppImage for desktop entry");
         tempDirObj.removeRecursively();
@@ -1234,50 +1328,24 @@ bool CliConverter::launchAppImage(const QString& appImagePath) {
     QString absolutePath = appImageInfo.absoluteFilePath();
     logToFile(QString("Launching AppImage: %1").arg(absolutePath));
     
-    // Try multiple launch methods for maximum compatibility
-    // Method 1: QProcess::startDetached with shell
-    bool started = QProcess::startDetached("/bin/sh", QStringList() << "-c" << QString("\"%1\" &").arg(absolutePath));
-    
-    if (started) {
-        logToFile("AppImage launched successfully using QProcess::startDetached with shell");
-        sendNotification("AppAlchemist", QString("Launching %1...").arg(QFileInfo(appImagePath).fileName()), "normal");
-        return true;
-    }
-    
-    logToFile("Method 1 failed, trying QProcess::startDetached directly...");
-    
-    // Method 2: QProcess::startDetached directly
-    started = QProcess::startDetached(absolutePath, QStringList());
+    // Launch AppImage directly without shell interpolation (SEC-CRIT-02)
+    bool started = QProcess::startDetached(absolutePath, QStringList());
     if (started) {
         logToFile("AppImage launched successfully using QProcess::startDetached");
         sendNotification("AppAlchemist", QString("Launching %1...").arg(QFileInfo(appImagePath).fileName()), "normal");
         return true;
     }
-    
-    logToFile("Method 2 failed, trying system()...");
-    
-    // Method 3: system() with nohup and disown
-    QString command = QString("nohup \"%1\" > /dev/null 2>&1 & disown").arg(absolutePath);
-    int result = system(command.toLocal8Bit().constData());
-    if (result == 0) {
-        logToFile("AppImage launched successfully using system() with nohup");
+
+    logToFile("Direct QProcess::startDetached failed, trying SubprocessWrapper...");
+    const ProcessResult res = SubprocessWrapper::execute(absolutePath, {}, {}, 10000);
+    if (res.exitCode == 0) {
+        logToFile("AppImage launched successfully using SubprocessWrapper");
         sendNotification("AppAlchemist", QString("Launching %1...").arg(QFileInfo(appImagePath).fileName()), "normal");
         return true;
     }
-    
-    logToFile("Method 3 failed, trying simple system()...");
-    
-    // Method 4: Simple system() call
-    command = QString("\"%1\" &").arg(absolutePath);
-    result = system(command.toLocal8Bit().constData());
-    if (result == 0) {
-        logToFile("AppImage launched successfully using simple system()");
-        sendNotification("AppAlchemist", QString("Launching %1...").arg(QFileInfo(appImagePath).fileName()), "normal");
-        return true;
-    }
-    
+
     // All methods failed
-    logToFile(QString("All launch methods failed. Last error code: %1").arg(result));
+    logToFile(QString("All launch methods failed for %1. Last error code: %2").arg(absolutePath).arg(res.exitCode));
     sendNotification("AppAlchemist Error", QString("Failed to launch %1").arg(QFileInfo(appImagePath).fileName()), "error");
     return false;
 }

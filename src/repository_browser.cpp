@@ -375,8 +375,10 @@ QList<PackageInfo> RepositoryBrowser::searchZypper(const QString& query, bool si
 
 bool RepositoryBrowser::downloadApt(const PackageInfo& package, const QString& outputDir) {
     QProcess process;
-    process.setProgram("bash");
-    process.setArguments({"-lc", QString("cd '%1' && apt download '%2'").arg(outputDir, package.name)});
+    const QString aptProgram = QFile::exists("/usr/bin/apt") ? QStringLiteral("/usr/bin/apt") : QStringLiteral("apt");
+    process.setProgram(aptProgram);
+    process.setArguments({"download", package.name});
+    process.setWorkingDirectory(outputDir);
     process.start();
     process.waitForFinished(180000);
     return process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;

@@ -34,10 +34,13 @@ bool readRpmHeaderSection(QFile& f, QByteArray& index, QByteArray& store, bool p
     const quint32 nindex = readBigEndian32(p + 8);
     const quint32 storeSize = readBigEndian32(p + 12);
     // Sanity bounds: RPM headers are small; reject absurd values to avoid huge reads.
-    if (nindex > 100000u || storeSize > 256u * 1024u * 1024u) {
+    if (nindex > 100000u || storeSize > 16u * 1024u * 1024u) {
         return false;
     }
     const qint64 indexBytes = qint64(nindex) * 16;
+    if (f.size() < f.pos() + indexBytes + qint64(storeSize)) {
+        return false;
+    }
     index = f.read(indexBytes);
     store = f.read(storeSize);
     if (index.size() != indexBytes || store.size() != qint64(storeSize)) {
@@ -228,14 +231,17 @@ bool RpmParser::extractRpm(const QString& rpmPath, const QString& extractDir) {
             qDebug() << "RPM extracted via libarchive";
             return true;
         }
-        qWarning() << "libarchive extraction did not yield files, trying external tools:" << laError;
+        qCritical() << "Secure archive extraction rejected RPM archive:" << laError;
+        return false; // HARD REJECT: Never fall back to insecure CLI tools
     }
 
+    // Fallback methods apply ONLY when libarchive is not compiled in:
     // Method 2: bsdtar (libarchive CLI). Also reads the RPM container directly
     // and supports the same set of compressors in a single command.
     if (toolAvailable("bsdtar")) {
+        const QString absRpmPath = QFileInfo(rpmPath).absoluteFilePath();
         const ProcessResult bsdtarResult = SubprocessWrapper::execute(
-            "bsdtar", {"-xf", rpmPath, "-C", extractPath}, {}, 300000);
+            "bsdtar", {"-xf", absRpmPath, "-C", extractPath}, {}, 300000);
         if (succeeded()) {
             qDebug() << "RPM extracted via bsdtar";
             return true;
@@ -246,9 +252,10 @@ bool RpmParser::extractRpm(const QString& rpmPath, const QString& extractDir) {
     // Method 3: rpm2cpio | cpio. The classic path; depends on both tools and on
     // rpm2cpio understanding the payload compressor.
     if (toolAvailable("rpm2cpio") && toolAvailable("cpio")) {
+        const QString absRpmPath = QFileInfo(rpmPath).absoluteFilePath();
         const ProcessResult cpioResult = SubprocessWrapper::executePipeline(
-            "rpm2cpio", {rpmPath},
-            "cpio", {"-idm", "--quiet"},
+            "rpm2cpio", {absRpmPath},
+            "cpio", {"-idm", "--quiet", "--no-absolute-filenames"},
             extractPath,
             300000);
         if (succeeded()) {
@@ -256,15 +263,6 @@ bool RpmParser::extractRpm(const QString& rpmPath, const QString& extractDir) {
             return true;
         }
         qWarning() << "rpm2cpio | cpio extraction failed:" << cpioResult.stderrOutput.left(200);
-    }
-
-    // Method 4: 7z, which can unpack some RPMs.
-    if (toolAvailable("7z")) {
-        SubprocessWrapper::execute("7z", {"x", "-y", rpmPath, "-o" + extractPath}, {}, 300000);
-        if (succeeded()) {
-            qDebug() << "RPM extracted via 7z";
-            return true;
-        }
     }
 
     qWarning() << "ERROR: Could not extract RPM" << rpmPath;
@@ -764,7 +762,7 @@ QString RpmParser::parseDesktopFile(const QString& desktopPath, PackageMetadata&
             }
         }
     } else if (!execCommand.isEmpty()) {
-        QString execPath = execCommand.split(' ').first();
+        QString execPath = extractDesktopExecBinary(execCommand);
         if (execPath.startsWith("/")) {
             QString fullPath = QString("%1%2").arg(dataDir).arg(execPath);
             if (QFileInfo::exists(fullPath)) {
@@ -815,7 +813,7 @@ QString RpmParser::parseDesktopFile(const QString& desktopPath, PackageMetadata&
                 break;
             }
             // Icon= is usually given without an extension; try common ones
-            for (const QString& ext : {"png", "svg", "xpm", "ico"}) {
+            for (const char* ext : {"png", "svg", "xpm", "ico"}) {
                 QString pathWithExt = QString("%1.%2").arg(path).arg(ext);
                 if (QFileInfo::exists(pathWithExt)) {
                     metadata.iconPath = pathWithExt;

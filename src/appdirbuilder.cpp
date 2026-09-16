@@ -10,6 +10,8 @@
 #include <QTextStream>
 #include <QDebug>
 #include <QRegularExpression>
+#include <QStandardPaths>
+#include <QCoreApplication>
 #include <algorithm>
 #include <limits>
 
@@ -453,21 +455,29 @@ bool AppDirBuilder::buildAppDir(const QString& appDirPath,
     }
     
     // Try to copy .desktop file from extracted package first (AFTER resources to ensure directory exists)
-    // For DEB: files are in data/usr/share/applications
-    // For RPM: files may be directly in usr/share/applications (if extracted without data/ prefix)
-    QString desktopSource = QString("%1/data/usr/share/applications").arg(extractedDebDir);
-    QString desktopSourceAlt = QString("%1/usr/share/applications").arg(extractedDebDir);  // For RPM without data/
-    QDir desktopSourceDir(desktopSource);
+    // Probe both extraction root and data/ subpath, as well as standard locations (REL-MED-22)
+    QStringList desktopSearchDirs = {
+        QString("%1/data/usr/share/applications").arg(extractedDebDir),
+        QString("%1/usr/share/applications").arg(extractedDebDir),
+        QString("%1/data/usr/local/share/applications").arg(extractedDebDir),
+        QString("%1/usr/local/share/applications").arg(extractedDebDir),
+        QString("%1/data").arg(extractedDebDir),
+        extractedDebDir
+    };
+
+    QString desktopSource;
+    QDir desktopSourceDir;
     bool desktopCopied = false;
-    
-    // Try data/usr/share/applications first (DEB), then usr/share/applications (RPM)
-    if (!desktopSourceDir.exists() && QDir(desktopSourceAlt).exists()) {
-        desktopSource = desktopSourceAlt;
-        desktopSourceDir = QDir(desktopSource);
-        qDebug() << "Using alternative desktop path (RPM format):" << desktopSource;
+
+    for (const QString& candidate : desktopSearchDirs) {
+        QDir dir(candidate);
+        if (dir.exists() && !dir.entryList({"*.desktop"}, QDir::Files).isEmpty()) {
+            desktopSource = candidate;
+            desktopSourceDir = dir;
+            qDebug() << "Found desktop directory in package:" << desktopSource;
+            break;
+        }
     }
-    
-    qDebug() << "Looking for .desktop file in:" << desktopSource;
     
     if (desktopSourceDir.exists()) {
         QStringList desktopFiles = desktopSourceDir.entryList({"*.desktop"}, QDir::Files);
@@ -525,29 +535,35 @@ bool AppDirBuilder::buildAppDir(const QString& appDirPath,
         qDebug() << "Desktop file copied from package";
     }
     
-    // Final verification - list all .desktop files
+    // Final verification - ensure AppDir root contains EXACTLY ONE .desktop file (SYS-HIGH-18)
+    // Remove any existing .desktop files at the AppDir root first
+    const QStringList existingRootDesktops = QDir(appDirPath).entryList({"*.desktop"}, QDir::Files);
+    for (const QString& existing : existingRootDesktops) {
+        QFile::remove(QDir(appDirPath).absoluteFilePath(existing));
+    }
+
     QString finalDesktopDir = QString("%1/usr/share/applications").arg(appDirPath);
     QDir finalDesktopDirObj(finalDesktopDir);
     if (finalDesktopDirObj.exists()) {
         QStringList finalDesktopFiles = finalDesktopDirObj.entryList({"*.desktop"}, QDir::Files);
         qDebug() << "Final .desktop files in AppDir:" << finalDesktopFiles;
-        for (const QString& file : finalDesktopFiles) {
-            QString fullPath = finalDesktopDirObj.absoluteFilePath(file);
-            qDebug() << "  -" << fullPath << "(exists:" << QFileInfo::exists(fullPath) << ")";
-            
-            // CRITICAL: appimagetool requires .desktop file in AppDir root!
-            // Copy .desktop file to AppDir root
-            QString rootDesktopPath = QString("%1/%2").arg(appDirPath).arg(file);
+        
+        if (!finalDesktopFiles.isEmpty()) {
+            const DesktopEntryCandidate preferred = selectPreferredDesktopEntry(finalDesktopDirObj, metadata.package);
+            const QString canonicalDesktopFile = !preferred.fileName.isEmpty() ? preferred.fileName : finalDesktopFiles.first();
+            const QString fullPath = finalDesktopDirObj.absoluteFilePath(canonicalDesktopFile);
+            const QString rootDesktopPath = QString("%1/%2").arg(appDirPath, canonicalDesktopFile);
+
             if (SubprocessWrapper::copyFile(fullPath, rootDesktopPath)) {
-                qDebug() << "Copied .desktop file to AppDir root:" << rootDesktopPath;
-                
+                qDebug() << "Copied canonical .desktop file to AppDir root:" << rootDesktopPath;
+
                 // Also ensure icon path in root .desktop file points to root icon
                 // Read and fix icon path in root .desktop
                 QFile rootDesktopFile(rootDesktopPath);
                 if (rootDesktopFile.open(QIODevice::ReadWrite | QIODevice::Text)) {
                     QString content = rootDesktopFile.readAll();
                     rootDesktopFile.close();
-                    
+
                     // Fix Icon= path to point to root icon (without path, just name)
                     QRegularExpression iconRegex("(?i)^Icon=(.+)$", QRegularExpression::MultilineOption);
                     QRegularExpressionMatch match = iconRegex.match(content);
@@ -557,7 +573,7 @@ bool AppDirBuilder::buildAppDir(const QString& appDirPath,
                         QString iconName = iconNameFromValue(iconValue);
                         if (!iconName.isEmpty()) {
                             content.replace(iconRegex, QString("Icon=%1").arg(iconName));
-                            
+
                             if (rootDesktopFile.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
                                 QTextStream out(&rootDesktopFile);
                                 out << content;
@@ -568,7 +584,15 @@ bool AppDirBuilder::buildAppDir(const QString& appDirPath,
                     }
                 }
             } else {
-                qWarning() << "Failed to copy .desktop file to AppDir root:" << rootDesktopPath;
+                qWarning() << "Failed to copy canonical .desktop file to AppDir root:" << rootDesktopPath;
+            }
+
+            // Remove any extraneous root .desktop files so only the canonical one remains
+            const QStringList remainingRootDesktops = QDir(appDirPath).entryList({"*.desktop"}, QDir::Files);
+            for (const QString& extra : remainingRootDesktops) {
+                if (extra != canonicalDesktopFile) {
+                    QFile::remove(QDir(appDirPath).absoluteFilePath(extra));
+                }
             }
         }
     } else {
@@ -602,6 +626,7 @@ bool AppDirBuilder::buildAppDir(const QString& appDirPath,
     // Copy icon (CRITICAL: appimagetool requires icon in AppDir root)
     QString rootIconName;
     QString iconNameToUse = iconNameFromDesktop.isEmpty() ? metadata.package : iconNameFromDesktop;
+    bool iconCopied = false;
     
     if (!metadata.iconPath.isEmpty()) {
         if (!copyIcon(appDirPath, metadata.iconPath, metadata)) {
@@ -624,7 +649,6 @@ bool AppDirBuilder::buildAppDir(const QString& appDirPath,
         
         // Try different icon names: from desktop, then package name
         QStringList iconNamesToTry = {iconNameToUse, metadata.package};
-        bool iconCopied = false;
         
         for (const QString& name : iconNamesToTry) {
             rootIconName = QString("%1.%2").arg(name).arg(iconExt);
@@ -641,22 +665,32 @@ bool AppDirBuilder::buildAppDir(const QString& appDirPath,
             qWarning() << "Failed to copy icon to AppDir root";
             rootIconName.clear();
         }
-    } else {
-        // Try to find icon in standard locations
-        QStringList iconSearchPaths = {
-            QString("%1/data/usr/share/pixmaps").arg(extractedDebDir),
-            QString("%1/data/usr/share/icons/hicolor/256x256/apps").arg(extractedDebDir),
-            QString("%1/data/usr/share/icons/hicolor/128x128/apps").arg(extractedDebDir),
-            QString("%1/data/usr/share/icons/hicolor/64x64/apps").arg(extractedDebDir),
-            QString("%1/data/usr/share/icons/hicolor/48x48/apps").arg(extractedDebDir),
-            QString("%1/data/usr/share/icons/hicolor/32x32/apps").arg(extractedDebDir),
-            QString("%1/data/usr/share/icons/hicolor/16x16/apps").arg(extractedDebDir),
-            QString("%1/data/usr/share/icons").arg(extractedDebDir),
-            QString("%1/data/opt").arg(extractedDebDir)
-        };
+    }
+    
+    if (!iconCopied) {
+        // Try to find icon in standard locations (probe both data/ and root for RPM/tarball support)
+        QStringList baseDirs;
+        if (QDir(QString("%1/data").arg(extractedDebDir)).exists()) {
+            baseDirs << QString("%1/data").arg(extractedDebDir);
+        }
+        baseDirs << extractedDebDir;
+
+        QStringList iconSearchPaths;
+        for (const QString& base : baseDirs) {
+            iconSearchPaths << QString("%1/usr/share/pixmaps").arg(base)
+                            << QString("%1/usr/share/icons/hicolor/256x256/apps").arg(base)
+                            << QString("%1/usr/share/icons/hicolor/scalable/apps").arg(base)
+                            << QString("%1/usr/share/icons/hicolor/128x128/apps").arg(base)
+                            << QString("%1/usr/share/icons/hicolor/64x64/apps").arg(base)
+                            << QString("%1/usr/share/icons/hicolor/48x48/apps").arg(base)
+                            << QString("%1/usr/share/icons/hicolor/32x32/apps").arg(base)
+                            << QString("%1/usr/share/icons/hicolor/16x16/apps").arg(base)
+                            << QString("%1/usr/share/icons").arg(base)
+                            << QString("%1/opt").arg(base)
+                            << base;
+        }
         
         QStringList iconExtensions = {"png", "svg", "xpm", "ico"};
-        bool iconFound = false;
         QStringList preferredIconNames = {iconNameToUse, metadata.package};
         QStringList iconCandidates;
         
@@ -676,11 +710,11 @@ bool AppDirBuilder::buildAppDir(const QString& appDirPath,
             QString rootIconPath = QString("%1/%2").arg(appDirPath).arg(rootIconName);
             if (SubprocessWrapper::copyFile(selectedIconPath, rootIconPath)) {
                 qDebug() << "Found and copied best icon:" << rootIconPath << "from" << selectedIconPath;
-                iconFound = true;
+                iconCopied = true;
             }
         }
         
-        if (!iconFound) {
+        if (!iconCopied) {
             qWarning() << "WARNING: No icon found for" << iconNameToUse;
             qWarning() << "Searched in:" << iconSearchPaths;
             qWarning() << "Creating a placeholder icon to satisfy appimagetool requirements";
@@ -699,7 +733,7 @@ bool AppDirBuilder::buildAppDir(const QString& appDirPath,
                 placeholderFile.write(placeholderPng);
                 placeholderFile.close();
                 qDebug() << "Created placeholder icon:" << rootIconPath;
-                iconFound = true;
+                iconCopied = true;
             } else {
                 qWarning() << "Failed to create placeholder icon:" << rootIconPath;
             }
@@ -738,6 +772,17 @@ bool AppDirBuilder::buildAppDir(const QString& appDirPath,
         }
     }
     
+    // Create .DirIcon as a relative symlink pointing to the root icon filename (SYS-HIGH-19)
+    if (!rootIconName.isEmpty()) {
+        QString dirIconPath = QString("%1/.DirIcon").arg(appDirPath);
+        QFile::remove(dirIconPath);
+        QString relativeIconTarget = QFileInfo(rootIconName).fileName();
+        if (!QFile::link(relativeIconTarget, dirIconPath)) {
+            SubprocessWrapper::copyFile(QString("%1/%2").arg(appDirPath, relativeIconTarget), dirIconPath);
+        }
+        qDebug() << "Created .DirIcon relative symlink pointing to:" << relativeIconTarget;
+    }
+
     // Create AppRun
     if (!createAppRun(appDirPath, metadata)) {
         qWarning() << "Failed to create AppRun";
@@ -1287,7 +1332,24 @@ bool AppDirBuilder::fixDesktopFile(const QString& desktopPath, const PackageMeta
     
     bool hasCategories = content.contains("Categories=", Qt::CaseInsensitive);
     bool modified = false;
-    const QString normalizedExec = "Exec=AppRun";
+    auto extractFieldCodes = [](const QString& section) -> QStringList {
+        QRegularExpression execMatchRegex("(?im)^Exec=(.*)$");
+        QRegularExpressionMatch match = execMatchRegex.match(section);
+        if (!match.hasMatch()) {
+            return {};
+        }
+        QString execLine = match.captured(1);
+        QRegularExpression fieldCodeRegex("%[fFuUick]");
+        auto it = fieldCodeRegex.globalMatch(execLine);
+        QStringList codes;
+        while (it.hasNext()) {
+            QString code = it.next().captured(0);
+            if (!codes.contains(code)) {
+                codes.append(code);
+            }
+        }
+        return codes;
+    };
 
     // Only replace Exec= in the main [Desktop Entry] section, not in [Desktop Action] sections
     // Find the extent of the main section: from [Desktop Entry] to the next [section] or EOF
@@ -1299,13 +1361,18 @@ bool AppDirBuilder::fixDesktopFile(const QString& desktopPath, const PackageMeta
         QString mainSection = content.mid(mainSectionStart, mainSectionEnd - mainSectionStart);
         QString restOfFile = content.mid(mainSectionEnd);
 
-        // Replace Exec= only in main section
+        // Replace Exec= only in main section, preserving Freedesktop field codes
         QRegularExpression execRegex("(?im)^Exec=.*$");
         if (mainSection.contains(execRegex)) {
+            QStringList codes = extractFieldCodes(mainSection);
+            QString normalizedExec = "Exec=AppRun";
+            if (!codes.isEmpty()) {
+                normalizedExec += " " + codes.join(" ");
+            }
             mainSection.replace(execRegex, normalizedExec);
             modified = true;
         } else {
-            mainSection.replace(QRegularExpression("(?i)(\\[Desktop Entry\\])"), QString("\\1\n%1").arg(normalizedExec));
+            mainSection.replace(QRegularExpression("(?i)(\\[Desktop Entry\\])"), QString("\\1\nExec=AppRun"));
             modified = true;
         }
 
@@ -1314,6 +1381,11 @@ bool AppDirBuilder::fixDesktopFile(const QString& desktopPath, const PackageMeta
         // No [Desktop Entry] section found, replace globally as fallback
         QRegularExpression execRegex("(?im)^Exec=.*$");
         if (content.contains(execRegex)) {
+            QStringList codes = extractFieldCodes(content);
+            QString normalizedExec = "Exec=AppRun";
+            if (!codes.isEmpty()) {
+                normalizedExec += " " + codes.join(" ");
+            }
             content.replace(execRegex, normalizedExec);
             modified = true;
         }
@@ -1428,11 +1500,11 @@ void AppDirBuilder::writeRuntimeModuleEnvironment(QTextStream& out, const QStrin
     }
 
     if (QDir(appDir.absoluteFilePath("usr/share/glib-2.0/schemas")).exists()) {
-        out << "export GSETTINGS_SCHEMA_DIR=\"${HERE}/usr/share/glib-2.0/schemas:${GSETTINGS_SCHEMA_DIR}\"\n";
+        out << "export GSETTINGS_SCHEMA_DIR=\"${HERE}/usr/share/glib-2.0/schemas${GSETTINGS_SCHEMA_DIR:+:${GSETTINGS_SCHEMA_DIR}}\"\n";
     }
 
     if (QDir(appDir.absoluteFilePath("usr/lib/girepository-1.0")).exists()) {
-        out << "export GI_TYPELIB_PATH=\"${HERE}/usr/lib/girepository-1.0:${GI_TYPELIB_PATH}\"\n";
+        out << "export GI_TYPELIB_PATH=\"${HERE}/usr/lib/girepository-1.0${GI_TYPELIB_PATH:+:${GI_TYPELIB_PATH}}\"\n";
     }
 
     const QString loadersDir = "usr/lib/gdk-pixbuf-2.0/2.10.0/loaders";
@@ -1467,6 +1539,32 @@ void AppDirBuilder::writeRuntimeModuleEnvironment(QTextStream& out, const QStrin
     out << "\n";
 }
 
+namespace {
+
+QString loadAppRunTemplate() {
+    const QString resourcePath = QStringLiteral(":/assets/AppRun.template");
+    QFile resFile(resourcePath);
+    if (resFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return QString::fromUtf8(resFile.readAll());
+    }
+
+    const QStringList fallbackPaths = {
+        QStringLiteral("assets/AppRun.template"),
+        QStringLiteral("../assets/AppRun.template"),
+        QStringLiteral("/usr/share/appalchemist/AppRun.template")
+    };
+    for (const QString& candidate : fallbackPaths) {
+        QFile fsFile(candidate);
+        if (fsFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            return QString::fromUtf8(fsFile.readAll());
+        }
+    }
+
+    return QString();
+}
+
+} // namespace
+
 bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadata& metadata) {
     QString appRunPath = QString("%1/AppRun").arg(appDirPath);
     
@@ -1485,9 +1583,7 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
     
     QTextStream out(&file);
     // Qt6 uses UTF-8 by default for QTextStream
-    out << "#!/bin/bash\n";
-    out << "HERE=\"$(dirname \"$(readlink -f \"${0}\")\")\"\n";
-    out << "\n";
+
     
     // UNIVERSAL: Detect application type
     // Wrap in try-catch to prevent crashes during detection
@@ -1549,20 +1645,28 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
         }
     }
     
-    out << "# Set up environment\n";
-    QString pathStr = "${HERE}/" + pathDirs.join(":${HERE}/") + ":${PATH}";
-    out << "export PATH=\"" << pathStr << "\"\n";
-    out << "\n";
-    
-    out << "# Set library paths (order matters - bundled libs first)\n";
-    QString libPathStr = "${HERE}/" + libDirs.join(":${HERE}/") + ":${LD_LIBRARY_PATH}";
-    out << "export LD_LIBRARY_PATH=\"" << libPathStr << "\"\n";
-    out << "\n";
-    
-    out << "# Set XDG directories\n";
-    out << "export XDG_DATA_DIRS=\"${HERE}/usr/share:${XDG_DATA_DIRS}\"\n";
-    out << "export XDG_CONFIG_DIRS=\"${HERE}/etc/xdg:${XDG_CONFIG_DIRS}\"\n";
-    out << "\n";
+    QString appRunTemplate = loadAppRunTemplate();
+    if (!appRunTemplate.isEmpty()) {
+        appRunTemplate.replace("@PATH_DIRS@", pathDirs.join(":${HERE}/"));
+        appRunTemplate.replace("@LIB_DIRS@", libDirs.join(":${HERE}/"));
+        out << appRunTemplate;
+        if (!appRunTemplate.endsWith('\n')) {
+            out << "\n";
+        }
+        out << "\n";
+    } else {
+        out << "#!/bin/bash\n";
+        out << "HERE=\"$(dirname \"$(readlink -f \"${0}\")\")\"\n\n";
+        out << "# Set up environment\n";
+        QString pathStr = "${HERE}/" + pathDirs.join(":${HERE}/");
+        out << "export PATH=\"" << pathStr << "${PATH:+:${PATH}}\"\n\n";
+        out << "# Set library paths (order matters - bundled libs first)\n";
+        QString libPathStr = "${HERE}/" + libDirs.join(":${HERE}/");
+        out << "export LD_LIBRARY_PATH=\"" << libPathStr << "${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}\"\n\n";
+        out << "# Set XDG directories\n";
+        out << "export XDG_DATA_DIRS=\"${HERE}/usr/share${XDG_DATA_DIRS:+:${XDG_DATA_DIRS}}\"\n";
+        out << "export XDG_CONFIG_DIRS=\"${HERE}/etc/xdg${XDG_CONFIG_DIRS:+:${XDG_CONFIG_DIRS}}\"\n\n";
+    }
 
     // Point the bundled GLib/GTK stack at its own loadable modules. Without
     // this a bundled libgio/libgdk_pixbuf searches the host prefix and either
@@ -1617,7 +1721,7 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
             out << "fi\n";
             out << "# Add JRE library paths to LD_LIBRARY_PATH only if using bundled JRE\n";
             out << "if [ -n \"$JRE_LIB_DIR\" ] && [ \"$JAVA\" != \"java\" ]; then\n";
-            out << "    export LD_LIBRARY_PATH=\"${JRE_LIB_DIR}:${JRE_LIB_DIR}/server:${LD_LIBRARY_PATH}\"\n";
+            out << "    export LD_LIBRARY_PATH=\"${JRE_LIB_DIR}:${JRE_LIB_DIR}/server${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}\"\n";
             out << "fi\n";
             // Determine jar location
             QString jarRelativePath = execPath;
@@ -1766,7 +1870,7 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
                     out << "# Found Electron binary: " << electronBinaryPath << "\n";
                     
                     // Add Electron base directory to LD_LIBRARY_PATH for bundled libs
-                    out << "export LD_LIBRARY_PATH=\"${HERE}/" << appInfo.baseDir << ":${LD_LIBRARY_PATH}\"\n";
+                    out << "export LD_LIBRARY_PATH=\"${HERE}/" << appInfo.baseDir << "${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}\"\n";
                     
                     // Change to the Electron app directory (important for proper execution)
                     out << "cd \"${HERE}/" << appInfo.baseDir << "\"\n";
@@ -1868,7 +1972,7 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
                 }
                 
                 // Set PYTHONPATH
-                out << "export PYTHONPATH=\"" << pythonLibDirs.join(":") << ":${PYTHONPATH}\"\n";
+                out << "export PYTHONPATH=\"" << pythonLibDirs.join(":") << "${PYTHONPATH:+:${PYTHONPATH}}\"\n";
                 
                 // Also set PYTHONHOME if Python is bundled
                 if (pythonInterpreter.startsWith("usr/") || pythonInterpreter.startsWith("opt/")) {
@@ -2114,7 +2218,7 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
                 }
                 
                 // Set PYTHONPATH
-                out << "export PYTHONPATH=\"" << pythonLibDirs.join(":") << ":${PYTHONPATH}\"\n";
+                out << "export PYTHONPATH=\"" << pythonLibDirs.join(":") << "${PYTHONPATH:+:${PYTHONPATH}}\"\n";
                 
                 // Also set PYTHONHOME if Python is bundled
                 if (pythonInterpreter.startsWith("usr/") || pythonInterpreter.startsWith("opt/")) {
@@ -2231,3 +2335,50 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
     
     return result;
 }
+
+QString AppDirBuilder::findAppImageTool() {
+    // 1. Check custom environment variable
+    QString envTool = qEnvironmentVariable("APPIMAGETOOL");
+    if (!envTool.isEmpty() && QFileInfo::exists(envTool) && QFileInfo(envTool).isExecutable()) {
+        return envTool;
+    }
+
+    // 2. Search in PATH
+    QString pathTool = QStandardPaths::findExecutable("appimagetool");
+    if (!pathTool.isEmpty() && QFileInfo::exists(pathTool) && QFileInfo(pathTool).isExecutable()) {
+        return pathTool;
+    }
+
+    // 3. Standard system paths
+    const QStringList systemPaths = {
+        "/usr/local/bin/appimagetool",
+        "/usr/bin/appimagetool",
+        "/bin/appimagetool",
+        "/opt/appimagetool"
+    };
+    for (const QString& path : systemPaths) {
+        if (QFileInfo::exists(path) && QFileInfo(path).isExecutable()) {
+            return path;
+        }
+    }
+
+    // 4. AppImage runtime locations and user directories
+    QString homeDir = QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
+    QString appDir = QCoreApplication::applicationDirPath();
+    const QStringList runtimePaths = {
+        QString("%1/.local/bin/appimagetool").arg(homeDir),
+        QString("%1/.cache/appalchemist/appimagetool").arg(homeDir),
+        QString("%1/appimagetool").arg(appDir),
+        QString("%1/thirdparty/appimagetool").arg(appDir),
+        QString("%1/../thirdparty/appimagetool").arg(appDir),
+        QString("%1/../../thirdparty/appimagetool").arg(appDir)
+    };
+    for (const QString& path : runtimePaths) {
+        if (QFileInfo::exists(path) && QFileInfo(path).isExecutable()) {
+            return path;
+        }
+    }
+
+    return QString();
+}
+

@@ -45,6 +45,7 @@ public:
     static bool copyDirectory(const QString& source, const QString& destination,
                               const QString& extractedRoot, const QString& destRoot);
     static bool createDirectory(const QString& path);
+    static QString createTemporaryDirectory(const QString& prefix = QStringLiteral("appalchemist"));
     static bool removeDirectory(const QString& path);
     static QString generateHash(const QString& filePath);
     static bool setExecutable(const QString& filePath);

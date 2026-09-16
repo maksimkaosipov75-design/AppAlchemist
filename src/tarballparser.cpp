@@ -129,26 +129,27 @@ bool TarballParser::validateTarball(const QString& tarballPath) {
 }
 
 bool TarballParser::extractTar(const QString& tarPath, const QString& extractDir, const QString& compression) {
+    const QString absTarPath = QFileInfo(tarPath).absoluteFilePath();
     // Prefer bsdtar (libarchive): it auto-detects compression and, unlike GNU
     // tar, refuses absolute paths and "../" members, so untrusted archives
     // cannot escape extractDir.
     ProcessResult bsd = SubprocessWrapper::execute(
-        "bsdtar", {"-x", "--no-same-owner", "-f", tarPath, "-C", extractDir});
+        "bsdtar", {"-x", "--no-same-owner", "-f", absTarPath, "-C", extractDir});
     if (bsd.success) {
         return true;
     }
 
-    QStringList args;
+    QStringList args = {"--no-same-owner", "-C", extractDir};
     if (compression == "gz") {
-        args = {"--no-same-owner", "-xzf", tarPath, "-C", extractDir};
+        args << "-xzf" << absTarPath << "--";
     } else if (compression == "xz") {
-        args = {"--no-same-owner", "-xJf", tarPath, "-C", extractDir};
+        args << "-xJf" << absTarPath << "--";
     } else if (compression == "bz2") {
-        args = {"--no-same-owner", "-xjf", tarPath, "-C", extractDir};
+        args << "-xjf" << absTarPath << "--";
     } else if (compression == "zstd") {
-        args = {"--no-same-owner", "--zstd", "-xf", tarPath, "-C", extractDir};
+        args << "--zstd" << "-xf" << absTarPath << "--";
     } else {
-        args = {"--no-same-owner", "-xf", tarPath, "-C", extractDir};
+        args << "-xf" << absTarPath << "--";
     }
 
     ProcessResult result = SubprocessWrapper::execute("tar", args);
@@ -156,22 +157,23 @@ bool TarballParser::extractTar(const QString& tarPath, const QString& extractDir
 }
 
 bool TarballParser::extractZip(const QString& zipPath, const QString& extractDir) {
+    const QString absZipPath = QFileInfo(zipPath).absoluteFilePath();
     // Prefer bsdtar (libarchive): rejects path-traversal entries that a plain
     // `unzip` would happily write outside extractDir ("zip slip").
-    ProcessResult result = SubprocessWrapper::execute("bsdtar", {"-xf", zipPath, "-C", extractDir});
+    ProcessResult result = SubprocessWrapper::execute("bsdtar", {"-xf", absZipPath, "-C", extractDir});
     if (result.success) {
         return true;
     }
 
     // Fallback to 7z.
-    result = SubprocessWrapper::execute("7z", {"x", "-y", QString("-o%1").arg(extractDir), zipPath});
+    result = SubprocessWrapper::execute("7z", {"x", "-y", QString("-o%1").arg(extractDir), "--", absZipPath});
     if (result.success) {
         return true;
     }
 
     // Last resort: unzip. Less safe against crafted archives, so it is only
     // used when no libarchive-based tool is available.
-    result = SubprocessWrapper::execute("unzip", {"-q", "-o", zipPath, "-d", extractDir});
+    result = SubprocessWrapper::execute("unzip", {"-q", "-o", "--", absZipPath, "-d", extractDir});
     return result.success;
 }
 
@@ -194,41 +196,41 @@ bool TarballParser::extractTarball(const QString& tarballPath, const QString& ex
 
     // Prefer the shared in-process extractor: libarchive auto-detects the
     // container (tar/zip) and compressor, and rejects path-traversal entries
-    // ("zip slip"). External tools (tar/unzip) are used only as a fallback.
+    // ("zip slip"). External tools (tar/unzip) are used only as a fallback
+    // when libarchive support was not compiled in.
     if (ArchiveExtractor::isAvailable()) {
         QString laError;
-        if (ArchiveExtractor::extractSecure(tarballPath, dataDir, &laError)) {
-            success = true;
-        } else {
-            qWarning() << "Secure extraction failed, falling back to external tools:" << laError;
+        if (!ArchiveExtractor::extractSecure(tarballPath, dataDir, &laError)) {
+            qCritical() << "Secure archive extraction rejected archive:" << laError;
+            return false; // HARD REJECT: Never fall back to insecure CLI tools
         }
-    }
-
-    if (!success)
-    switch (m_type) {
-        case TarballType::TAR_GZ:
-            success = extractTar(tarballPath, dataDir, "gz");
-            break;
-        case TarballType::TAR_XZ:
-            success = extractTar(tarballPath, dataDir, "xz");
-            break;
-        case TarballType::TAR_BZ2:
-            success = extractTar(tarballPath, dataDir, "bz2");
-            break;
-        case TarballType::TAR_ZSTD:
-            success = extractTar(tarballPath, dataDir, "zstd");
-            break;
-        case TarballType::TAR_BIN:
-            success = extractTar(tarballPath, dataDir, "");
-            break;
-        case TarballType::ZIP:
-            success = extractZip(tarballPath, dataDir);
-            break;
-        case TarballType::TAR:
-            success = extractTar(tarballPath, dataDir, "");
-            break;
-        default:
-            return false;
+        success = true;
+    } else {
+        switch (m_type) {
+            case TarballType::TAR_GZ:
+                success = extractTar(tarballPath, dataDir, "gz");
+                break;
+            case TarballType::TAR_XZ:
+                success = extractTar(tarballPath, dataDir, "xz");
+                break;
+            case TarballType::TAR_BZ2:
+                success = extractTar(tarballPath, dataDir, "bz2");
+                break;
+            case TarballType::TAR_ZSTD:
+                success = extractTar(tarballPath, dataDir, "zstd");
+                break;
+            case TarballType::TAR_BIN:
+                success = extractTar(tarballPath, dataDir, "");
+                break;
+            case TarballType::ZIP:
+                success = extractZip(tarballPath, dataDir);
+                break;
+            case TarballType::TAR:
+                success = extractTar(tarballPath, dataDir, "");
+                break;
+            default:
+                return false;
+        }
     }
     
     if (!success) {
@@ -393,7 +395,12 @@ QString TarballParser::parseDesktopFile(const QString& desktopPath, PackageMetad
         QString dataDir = QFileInfo(desktopPath).absolutePath();
         // Go up to find base directory
         while (!dataDir.isEmpty() && !dataDir.endsWith("/data")) {
-            dataDir = QFileInfo(dataDir).absolutePath();
+            QString parent = QFileInfo(dataDir).absolutePath();
+            if (parent == dataDir || parent == "/") {
+                dataDir.clear(); // Reached filesystem root without finding /data
+                break;
+            }
+            dataDir = parent;
         }
         
         if (!dataDir.isEmpty()) {
@@ -410,7 +417,7 @@ QString TarballParser::parseDesktopFile(const QString& desktopPath, PackageMetad
                     break;
                 }
                 // Try with extensions
-                for (const QString& ext : {"png", "svg", "xpm", "ico"}) {
+                for (const char* ext : {"png", "svg", "xpm", "ico"}) {
                     QString pathWithExt = QString("%1.%2").arg(path).arg(ext);
                     if (QFileInfo::exists(pathWithExt)) {
                         metadata.iconPath = pathWithExt;
@@ -469,12 +476,12 @@ QStringList TarballParser::searchInDirectory(const QString& dir, const QStringLi
                 results.append(entry.absoluteFilePath());
             }
         }
-        
-        // Recursively search subdirectories
-        QFileInfoList subdirs = dirObj.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
-        for (const QFileInfo& subdir : subdirs) {
-            results.append(searchInDirectory(subdir.absoluteFilePath(), patterns, executableOnly));
-        }
+    }
+    
+    // Recursively search subdirectories outside pattern loop
+    QFileInfoList subdirs = dirObj.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QFileInfo& subdir : subdirs) {
+        results.append(searchInDirectory(subdir.absoluteFilePath(), patterns, executableOnly));
     }
     
     return results;

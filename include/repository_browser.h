@@ -99,6 +99,7 @@ private:
     QThread* m_searchThread;
     RepositorySearchWorker* m_searchWorker;
     
+public:
     // Search implementations for different package managers
     // Made public for worker thread access
     QList<PackageInfo> searchApt(const QString& query, bool silent = false);
@@ -106,14 +107,14 @@ private:
     QList<PackageInfo> searchPacman(const QString& query, bool silent = false);
     QList<PackageInfo> searchZypper(const QString& query, bool silent = false);
     
-    // Friend class for worker access
     friend class RepositorySearchWorker;
     
     // Download implementations
     bool downloadApt(const PackageInfo& package, const QString& outputDir);
     bool downloadDnf(const PackageInfo& package, const QString& outputDir);
     bool downloadPacman(const PackageInfo& package, const QString& outputDir);
-    
+
+private:
     // Parse package info from different formats
     PackageInfo parseAptShowOutput(const QString& output);
     PackageInfo parseDnfInfoOutput(const QString& output);

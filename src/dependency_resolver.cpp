@@ -212,6 +212,152 @@ QString originRelativePath(const QString& fromDir, const QString& toDir) {
     return QString("$ORIGIN/%1").arg(relative);
 }
 
+} // end anonymous namespace
+
+// Executes ldd inside an unshared bubblewrap sandbox if available; otherwise falls back
+// to passive DT_NEEDED static inspection via readelf -d (never executes binary code directly).
+QStringList DependencyResolver::runSafeLdd(const QString& binaryPath, const QProcessEnvironment& env) {
+    QStringList lddOutput;
+    const QString absBinaryPath = QFileInfo(binaryPath).absoluteFilePath();
+
+    const bool bwrapBypassed = qEnvironmentVariableIsSet("APPALCHEMIST_DISABLE_BWRAP") ||
+                               env.contains("APPALCHEMIST_DISABLE_BWRAP");
+    const QString bwrapPath = bwrapBypassed ? QString() : QStandardPaths::findExecutable("bwrap");
+
+    if (!bwrapPath.isEmpty()) {
+        QStringList bwrapArgs = {
+            "--unshare-all",
+            "--ro-bind", "/", "/",
+            "--dev", "/dev",
+            "--proc", "/proc",
+            "--tmpfs", "/tmp"
+        };
+
+        // If target binary is under /tmp/ or /var/tmp/, bind-mount it read-only
+        // to prevent --tmpfs /tmp from masking the binary
+        if (absBinaryPath.startsWith("/tmp/") || absBinaryPath.startsWith("/var/tmp/")) {
+            bwrapArgs << "--ro-bind" << absBinaryPath << absBinaryPath;
+        }
+
+        // If an enclosing directory (such as AppDir or extracted tree) is known under /tmp/ or /var/tmp/, bind-mount it
+        QDir dir(QFileInfo(absBinaryPath).absolutePath());
+        QString enclosingDir;
+        while (!dir.isRoot()) {
+            const QString path = dir.absolutePath();
+            const QString name = dir.dirName();
+            if (name.endsWith(".AppDir", Qt::CaseInsensitive) || name == "AppDir" ||
+                path.contains("/appalchemist-") || path.contains("/staged_deps")) {
+                enclosingDir = path;
+                break;
+            }
+            if (!dir.cdUp()) break;
+        }
+        if (!enclosingDir.isEmpty() && (enclosingDir.startsWith("/tmp/") || enclosingDir.startsWith("/var/tmp/"))) {
+            bwrapArgs << "--ro-bind" << enclosingDir << enclosingDir;
+        }
+
+        // If env contains LD_LIBRARY_PATH, split by ':' and for each directory path located
+        // under /tmp/ or /var/tmp/ that exists on disk, bind-mount it read-only
+        QString ldLibraryPath = env.value("LD_LIBRARY_PATH");
+        if (ldLibraryPath.isEmpty()) {
+            ldLibraryPath = QProcessEnvironment::systemEnvironment().value("LD_LIBRARY_PATH");
+        }
+        if (!ldLibraryPath.isEmpty()) {
+            const QStringList libDirs = ldLibraryPath.split(':', Qt::SkipEmptyParts);
+            for (const QString& dirPath : libDirs) {
+                const QString absDirPath = QFileInfo(dirPath).absoluteFilePath();
+                if ((absDirPath.startsWith("/tmp/") || absDirPath.startsWith("/var/tmp/")) && QDir(absDirPath).exists()) {
+                    bwrapArgs << "--ro-bind" << absDirPath << absDirPath;
+                }
+            }
+        }
+
+        bwrapArgs << "--" << "ldd" << absBinaryPath;
+
+        const bool simulateFailure = qEnvironmentVariableIsSet("APPALCHEMIST_SIMULATE_BWRAP_FAILURE") ||
+                                     env.contains("APPALCHEMIST_SIMULATE_BWRAP_FAILURE");
+        if (!simulateFailure) {
+            ProcessResult result = SubprocessWrapper::execute(bwrapPath, bwrapArgs, {}, 30000, env);
+            if (result.success && !result.stdoutOutput.trimmed().isEmpty()) {
+                lddOutput = result.stdoutOutput.split('\n', Qt::SkipEmptyParts);
+            }
+        }
+    }
+
+    // Automatic fallback to passive DT_NEEDED parsing via readelf -d (never executes untrusted binary):
+    // Triggers if bwrap is missing, bypassed, or if bwrap execution failed (e.g. exit code != 0,
+    // empty output, or unprivileged user namespaces disabled)
+    if (lddOutput.isEmpty()) {
+        QString readelfCmd = QStandardPaths::findExecutable("readelf");
+        if (readelfCmd.isEmpty()) {
+            readelfCmd = QStandardPaths::findExecutable("llvm-readelf");
+        }
+        if (!readelfCmd.isEmpty()) {
+            QProcessEnvironment readelfEnv = env;
+            readelfEnv.insert("LC_ALL", "C");
+            ProcessResult result = SubprocessWrapper::execute(readelfCmd, {"-d", absBinaryPath}, {}, 10000, readelfEnv);
+            if (result.success) {
+                QStringList searchDirs;
+                QString ldLibraryPath = env.value("LD_LIBRARY_PATH");
+                if (ldLibraryPath.isEmpty()) {
+                    ldLibraryPath = QProcessEnvironment::systemEnvironment().value("LD_LIBRARY_PATH");
+                }
+                if (!ldLibraryPath.isEmpty()) {
+                    searchDirs << ldLibraryPath.split(':', Qt::SkipEmptyParts);
+                }
+                const QString binDir = QFileInfo(absBinaryPath).absolutePath();
+                if (!binDir.isEmpty()) {
+                    searchDirs << binDir;
+                    searchDirs << QDir(binDir).filePath("../lib");
+                    searchDirs << QDir(binDir).filePath("../lib64");
+                }
+                searchDirs << "/usr/lib/x86_64-linux-gnu" << "/lib/x86_64-linux-gnu"
+                           << "/usr/lib/aarch64-linux-gnu" << "/lib/aarch64-linux-gnu"
+                           << "/usr/lib64" << "/lib64" << "/usr/lib" << "/lib";
+
+                const QStringList rawLines = result.stdoutOutput.split('\n', Qt::SkipEmptyParts);
+                for (const QString& rLine : rawLines) {
+                    if (rLine.contains("(RPATH)") || rLine.contains("(RUNPATH)")) {
+                        const int openBracket = rLine.indexOf('[');
+                        const int closeBracket = rLine.indexOf(']', openBracket);
+                        if (openBracket >= 0 && closeBracket > openBracket) {
+                            QString rpathStr = rLine.mid(openBracket + 1, closeBracket - openBracket - 1).trimmed();
+                            rpathStr.replace("$ORIGIN", binDir);
+                            rpathStr.replace("${ORIGIN}", binDir);
+                            const QStringList rpathDirs = rpathStr.split(':', Qt::SkipEmptyParts);
+                            for (int i = rpathDirs.size() - 1; i >= 0; --i) {
+                                searchDirs.prepend(rpathDirs[i]);
+                            }
+                        }
+                    }
+                }
+
+                for (const QString& rLine : rawLines) {
+                    if (!rLine.contains("(NEEDED)")) continue;
+                    const int openBracket = rLine.indexOf('[');
+                    const int closeBracket = rLine.indexOf(']', openBracket);
+                    if (openBracket < 0 || closeBracket <= openBracket) continue;
+                    const QString soname = rLine.mid(openBracket + 1, closeBracket - openBracket - 1).trimmed();
+                    if (soname.isEmpty()) continue;
+
+                    QString resolvedPath;
+                    for (const QString& sDir : searchDirs) {
+                        const QString candidate = sDir + "/" + soname;
+                        if (QFileInfo::exists(candidate)) {
+                            resolvedPath = candidate;
+                            break;
+                        }
+                    }
+                    if (!resolvedPath.isEmpty()) {
+                        lddOutput.append(QString("\t%1 => %2 (0x0)").arg(soname, resolvedPath));
+                    } else {
+                        lddOutput.append(QString("\t%1 => not found").arg(soname));
+                    }
+                }
+            }
+        }
+    }
+    return lddOutput;
 }
 
 namespace {
@@ -444,13 +590,10 @@ LibraryBundleReport DependencyResolver::bundleSystemLibraries(const QString& app
             const QString binary = pending.dequeue();
             report.scannedBinaries++;
 
-            const ProcessResult lddResult =
-                SubprocessWrapper::execute("ldd", {binary}, {}, 30000, env);
-            if (!lddResult.success && lddResult.stdoutOutput.isEmpty()) {
+            const QStringList lines = runSafeLdd(binary, env);
+            if (lines.isEmpty()) {
                 continue;
             }
-
-            const QStringList lines = lddResult.stdoutOutput.split('\n');
             for (const QString& line : lines) {
                 QString soname;
                 QString hostPath;
@@ -835,9 +978,11 @@ bool DependencyResolver::downloadAndExtract(const QString& packageName, const QS
     emit log(QString("  Downloading: %1").arg(packageName));
     
     // Create temp directory for download
-    QString tempDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation) 
-        + "/appalchemist-deps-" + QString::number(QDateTime::currentMSecsSinceEpoch());
-    QDir().mkpath(tempDir);
+    QString tempDir = SubprocessWrapper::createTemporaryDirectory("appalchemist-deps");
+    if (tempDir.isEmpty()) {
+        emit log(QString("  Failed to create temporary download directory"));
+        return false;
+    }
     
     // Use package manager to download
     PackageManager pm = RepositoryBrowser::detectPackageManager();
@@ -955,18 +1100,27 @@ bool DependencyResolver::downloadAndExtract(const QString& packageName, const QS
 QStringList DependencyResolver::extractLibraries(const QString& packagePath, const QString& outputDir) {
     QStringList libs;
     
-    QString tempExtract = QStandardPaths::writableLocation(QStandardPaths::TempLocation)
-        + "/appalchemist-extract-" + QString::number(QDateTime::currentMSecsSinceEpoch());
-    QDir().mkpath(tempExtract);
+    if (outputDir.trimmed().isEmpty()) {
+        qCritical() << "Refusing to extract into empty outputDir";
+        emit log("ERROR: Refusing to extract libraries into empty outputDir");
+        return libs;
+    }
+
+    QString tempExtract = SubprocessWrapper::createTemporaryDirectory("appalchemist-extract");
+    if (tempExtract.isEmpty()) {
+        emit log("ERROR: Failed to create temporary extraction directory");
+        return libs;
+    }
     
     bool extracted = false;
+    const QString absPackagePath = QFileInfo(packagePath).absoluteFilePath();
     
     if (packagePath.endsWith(".deb")) {
         // Extract .deb
         QString arDir = tempExtract + "/ar";
         QDir().mkpath(arDir);
         
-        ProcessResult arResult = SubprocessWrapper::execute("ar", {"x", packagePath}, arDir, 30000);
+        ProcessResult arResult = SubprocessWrapper::execute("ar", {"x", absPackagePath}, arDir, 30000);
         if (arResult.success) {
             QDir arDirObj(arDir);
             QStringList dataFiles = arDirObj.entryList({"data.tar.*"}, QDir::Files);
@@ -993,9 +1147,13 @@ QStringList DependencyResolver::extractLibraries(const QString& packagePath, con
         QString dataDir = tempExtract + "/data";
         QDir().mkpath(dataDir);
         
-        // Use rpm2cpio and cpio
-        QString command = QString("rpm2cpio \"%1\" | cpio -idm --quiet").arg(packagePath);
-        ProcessResult result = SubprocessWrapper::execute("/bin/sh", {"-c", command}, dataDir, 60000);
+        // Use rpm2cpio and cpio via structured pipeline without shell
+        ProcessResult result = SubprocessWrapper::executePipeline(
+            "rpm2cpio", {absPackagePath},
+            "cpio", {"-idm", "--quiet", "--no-absolute-filenames"},
+            dataDir,
+            60000
+        );
         extracted = result.success;
     } else if (packagePath.contains(".pkg.tar")) {
         // Extract Arch Linux .pkg.tar.* (zst, xz, gz, etc.)
@@ -1004,13 +1162,13 @@ QStringList DependencyResolver::extractLibraries(const QString& packagePath, con
         
         QStringList tarArgs;
         if (packagePath.endsWith(".zst")) {
-            tarArgs = {"--zstd", "-xf", packagePath, "-C", dataDir};
+            tarArgs = {"--zstd", "-xf", absPackagePath, "-C", dataDir};
         } else if (packagePath.endsWith(".xz")) {
-            tarArgs = {"-xJf", packagePath, "-C", dataDir};
+            tarArgs = {"-xJf", absPackagePath, "-C", dataDir};
         } else if (packagePath.endsWith(".gz")) {
-            tarArgs = {"-xzf", packagePath, "-C", dataDir};
+            tarArgs = {"-xzf", absPackagePath, "-C", dataDir};
         } else {
-            tarArgs = {"-xf", packagePath, "-C", dataDir};
+            tarArgs = {"-xf", absPackagePath, "-C", dataDir};
         }
         
         ProcessResult result = SubprocessWrapper::execute("tar", tarArgs, {}, 60000);
@@ -1052,31 +1210,36 @@ QStringList DependencyResolver::extractLibraries(const QString& packagePath, con
                     libs.append(dest);
                     emit log(QString("  Copied library: %1 -> %2").arg(name).arg(relPath));
                     
-                    // Create symlinks for .so files (e.g., libgsl.so.28 -> libgsl.so.28.0.0)
-                    if (name.contains(".so.") && !name.endsWith(".so")) {
-                        // Extract base name (e.g., libgsl.so.28 from libgsl.so.28.0.0)
-                        QStringList parts = name.split('.');
-                        if (parts.size() >= 3) {
-                            QString symlinkName = parts[0] + "." + parts[1] + "." + parts[2]; // libgsl.so.28
-                            QString symlinkPath = libDir + "/" + symlinkName;
-                            if (!QFile::exists(symlinkPath)) {
-                                // Remove existing file if it's not a symlink
-                                if (QFile::exists(symlinkPath)) {
+                    // Create symlinks for .so files using pattern matching (e.g., libgdk-pixbuf-2.0.so.0 -> libgdk-pixbuf-2.0.so.0.4200.8)
+                    const QString symlinkDir = destInfo.absolutePath();
+                    const int soIdx = name.indexOf(".so.");
+                    if (soIdx != -1) {
+                        const QString prefix = name.left(soIdx + 3); // "libfoo.so" or "libgdk-pixbuf-2.0.so"
+                        const QString versionPart = name.mid(soIdx + 4); // "0.4200.8" or "28.0.0"
+                        const QStringList vParts = versionPart.split('.');
+                        if (!vParts.isEmpty() && !vParts[0].isEmpty()) {
+                            // Major version symlink: libfoo.so.X -> libfoo.so.X.Y.Z
+                            const QString symlinkName = prefix + "." + vParts[0];
+                            const QString symlinkPath = symlinkDir + "/" + symlinkName;
+                            if (symlinkName != name) {
+                                if (QFileInfo::exists(symlinkPath) || QFileInfo(symlinkPath).isSymLink()) {
                                     QFile::remove(symlinkPath);
                                 }
-                                // Create symlink with relative path
-                                QFile::link(name, symlinkPath);
-                                emit log(QString("  Created symlink: %1 -> %2").arg(symlinkName).arg(name));
+                                if (QFile::link(name, symlinkPath)) {
+                                    emit log(QString("  Created symlink: %1 -> %2").arg(symlinkName).arg(name));
+                                }
                             }
-                        }
-                        // Also create libgsl.so -> libgsl.so.28 if needed
-                        if (parts.size() >= 3) {
-                            QString baseName = parts[0] + "." + parts[1]; // libgsl.so
-                            QString basePath = libDir + "/" + baseName;
-                            if (!QFile::exists(basePath)) {
-                                QString targetName = parts[0] + "." + parts[1] + "." + parts[2]; // libgsl.so.28
-                                QFile::link(targetName, basePath);
-                                emit log(QString("  Created symlink: %1 -> %2").arg(baseName).arg(targetName));
+
+                            // Base soname symlink: libfoo.so -> libfoo.so.X
+                            const QString baseName = prefix;
+                            const QString basePath = symlinkDir + "/" + baseName;
+                            if (baseName != name && baseName != symlinkName) {
+                                if (QFileInfo::exists(basePath) || QFileInfo(basePath).isSymLink()) {
+                                    QFile::remove(basePath);
+                                }
+                                if (QFile::link(symlinkName, basePath)) {
+                                    emit log(QString("  Created symlink: %1 -> %2").arg(baseName).arg(symlinkName));
+                                }
                             }
                         }
                     }
@@ -1204,15 +1367,14 @@ QString DependencyResolver::findPackageForLibrary(const QString& libName) {
 QStringList DependencyResolver::findMissingLibraries(const QString& binaryPath) {
     QStringList missing;
     
-    // Run ldd on the binary
-    ProcessResult result = SubprocessWrapper::execute("ldd", {binaryPath}, {}, 30000);
-    if (!result.success) {
+    // Run safe ldd on the binary
+    QStringList lines = runSafeLdd(binaryPath);
+    if (lines.isEmpty()) {
         emit log(QString("  Failed to run ldd on %1").arg(binaryPath));
         return missing;
     }
     
     // Parse ldd output for "not found" lines
-    QStringList lines = result.stdoutOutput.split('\n');
     for (const QString& line : lines) {
         if (line.contains("not found")) {
             // Format: "libXXX.so.N => not found"
@@ -1239,16 +1401,15 @@ bool DependencyResolver::resolveMissingLibraries(const QString& binaryPath, cons
     QString existingLdPath = env.value("LD_LIBRARY_PATH");
     env.insert("LD_LIBRARY_PATH", libPath + ":" + existingLdPath);
     
-    // Run ldd with AppDir libs
-    ProcessResult result = SubprocessWrapper::execute("ldd", {binaryPath}, {}, 30000, env);
-    if (!result.success) {
+    // Run safe ldd with AppDir libs
+    QStringList lines = runSafeLdd(binaryPath, env);
+    if (lines.isEmpty()) {
         emit log(QString("  Failed to analyze binary"));
         return false;
     }
     
     // Parse missing libraries
     QStringList missing;
-    QStringList lines = result.stdoutOutput.split('\n');
     for (const QString& line : lines) {
         if (line.contains("not found")) {
             QString trimmed = line.trimmed();
@@ -1301,9 +1462,8 @@ bool DependencyResolver::resolveMissingLibraries(const QString& binaryPath, cons
     // Verify libraries are now available
     if (downloaded > 0) {
         emit log("=== Verifying downloaded libraries ===");
-        ProcessResult verifyResult = SubprocessWrapper::execute("ldd", {binaryPath}, {}, 30000, env);
-        if (verifyResult.success) {
-            QStringList verifyLines = verifyResult.stdoutOutput.split('\n');
+        QStringList verifyLines = runSafeLdd(binaryPath, env);
+        if (!verifyLines.isEmpty()) {
             int stillMissing = 0;
             for (const QString& line : verifyLines) {
                 if (line.contains("not found")) {

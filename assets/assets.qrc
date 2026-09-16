@@ -1,0 +1,7 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+<qresource prefix="/assets">
+    <file alias="compatibility_rules.json">compatibility_rules.json</file>
+    <file alias="AppRun.template">AppRun.template</file>
+</qresource>
+</RCC>
