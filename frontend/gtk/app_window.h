@@ -4,8 +4,10 @@
 #include <adwaita.h>
 #include <atomic>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 #include "conversion_controller.h"
 #include "repository_browser.h"
@@ -13,9 +15,19 @@
 class AppWindow {
 public:
     explicit AppWindow(AdwApplication* app);
+    ~AppWindow();
+
+    AppWindow(const AppWindow&) = delete;
+    AppWindow& operator=(const AppWindow&) = delete;
+
     void present();
 
 private:
+    // Queues a callback onto the GTK main loop, dropping it if the window has
+    // already been torn down. Every cross-thread UI update must go through
+    // this instead of calling runOnMain() with a raw `this`.
+    void postToMain(std::function<void()> fn);
+    void shutdownWorker();
     void buildUi();
     void loadCss();
     void updateFileSummary();
@@ -48,6 +60,7 @@ private:
     static void onRepositoryDownloadClicked(GtkButton* button, gpointer userData);
     static void onToggleLogClicked(GtkButton* button, gpointer userData);
     static void onToggleAuxiliaryClicked(GtkButton* button, gpointer userData);
+    static void onWindowDestroyed(GtkWidget* widget, gpointer userData);
     static gboolean onDropFiles(GtkDropTarget* target, const GValue* value, double x, double y, gpointer userData);
     static void onFilesDialogFinished(GObject* sourceObject, GAsyncResult* result, gpointer userData);
     static void onOutputDialogFinished(GObject* sourceObject, GAsyncResult* result, gpointer userData);
@@ -85,6 +98,10 @@ private:
     std::atomic<bool> m_running;
     std::mutex m_controllerMutex;
     ConversionController* m_activeController;
+    // Cleared once the GTK window is destroyed so that in-flight worker
+    // callbacks stop touching freed widgets.
+    std::shared_ptr<std::atomic<bool>> m_alive;
+    std::jthread m_conversionThread;
     RepositoryBrowser* m_repositoryBrowser;
     QList<PackageInfo> m_searchResults;
     bool m_isSearching;

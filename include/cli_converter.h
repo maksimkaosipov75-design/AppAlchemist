@@ -62,6 +62,9 @@ private:
     QString extractAndInstallIcon(const QDir& squashfsRoot, const QString& appImagePath, const QString& desktopContent,
                                   const QString& desktopBaseName = QString());
     QString determineAppImagePath(const QString& packagePath, const QString& customOutputDir);
+    // Copies a cached AppImage to the location the caller asked for, so a
+    // cache hit behaves exactly like a fresh conversion.
+    bool placeCachedAppImage(const QString& cachedPath, const QString& targetPath);
     
     QPointer<PackageToAppImagePipeline> m_pipeline;
     QPointer<QThread> m_pipelineThread;

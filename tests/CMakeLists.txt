@@ -47,6 +47,29 @@ if(TARGET appalchemist-cli)
     )
 endif()
 
+# Standalone empirical stress harnesses. They use their own pass/fail counters
+# and return non-zero on failure, so CTest runs each as a single test.
+set(APPALCHEMIST_STRESS_HARNESSES
+    empirical_m4_stress_test
+    empirical_m4_fresh_stress
+    empirical_controller_runs_stress_test
+)
+
+foreach(HARNESS ${APPALCHEMIST_STRESS_HARNESSES})
+    add_executable(${HARNESS} ${HARNESS}.cpp)
+    target_include_directories(${HARNESS} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    )
+    target_link_libraries(${HARNESS} PRIVATE
+        appalchemist_core
+        Qt6::Core
+        PkgConfig::LIBARCHIVE
+    )
+    target_compile_definitions(${HARNESS} PRIVATE HAVE_LIBARCHIVE)
+    add_test(NAME ${HARNESS} COMMAND ${HARNESS})
+    set_tests_properties(${HARNESS} PROPERTIES TIMEOUT 600)
+endforeach()
+
 include(CTest)
 include(Catch)
 catch_discover_tests(appalchemist_tests)

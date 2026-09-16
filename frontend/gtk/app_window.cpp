@@ -107,6 +107,7 @@ AppWindow::AppWindow(AdwApplication* app)
     , m_outputDir(defaultOutputDir())
     , m_running(false)
     , m_activeController(nullptr)
+    , m_alive(std::make_shared<std::atomic<bool>>(true))
     , m_repositoryBrowser(new RepositoryBrowser())
     , m_isSearching(false)
     , m_isDownloading(false)
@@ -132,7 +133,7 @@ AppWindow::AppWindow(AdwApplication* app)
                      [this](const QList<PackageInfo>& results) {
         m_searchResults = results;
         m_isSearching = false;
-        runOnMain([this]() {
+        postToMain([this]() {
             updateSearchState("Search complete.");
             refreshSearchResults();
             updateActions();
@@ -143,7 +144,7 @@ AppWindow::AppWindow(AdwApplication* app)
                      [this](const QString& error) {
         m_isSearching = false;
         const auto text = toStdString(error);
-        runOnMain([this, text]() {
+        postToMain([this, text]() {
             updateSearchState(text);
             appendLog("Repository search error: " + text);
             updateActions();
@@ -154,7 +155,7 @@ AppWindow::AppWindow(AdwApplication* app)
                      [this](const QString& packagePath) {
         m_isDownloading = false;
         const auto path = toStdString(packagePath);
-        runOnMain([this, path]() {
+        postToMain([this, path]() {
             m_packagePaths = {path};
             updateFileSummary();
             updateActions();
@@ -167,7 +168,7 @@ AppWindow::AppWindow(AdwApplication* app)
                      [this](const QString& error) {
         m_isDownloading = false;
         const auto text = toStdString(error);
-        runOnMain([this, text]() {
+        postToMain([this, text]() {
             updateSearchState(text);
             appendLog("Repository download error: " + text);
             updateActions();
@@ -178,11 +179,50 @@ AppWindow::AppWindow(AdwApplication* app)
                      [this](const QString& packageName) {
         m_isDownloading = true;
         const auto text = toStdString(packageName);
-        runOnMain([this, text]() {
+        postToMain([this, text]() {
             updateSearchState("Downloading " + text + "...");
             updateActions();
         });
     });
+}
+
+AppWindow::~AppWindow() {
+    shutdownWorker();
+
+    if (m_repositoryBrowser) {
+        m_repositoryBrowser->disconnect();
+        delete m_repositoryBrowser;
+        m_repositoryBrowser = nullptr;
+    }
+}
+
+void AppWindow::shutdownWorker() {
+    // Stop queued callbacks first: after this point they must not touch the
+    // widgets, which GTK may already have destroyed.
+    m_alive->store(false);
+
+    requestCancel();
+
+    if (m_conversionThread.joinable()) {
+        m_conversionThread.join();
+    }
+}
+
+void AppWindow::postToMain(std::function<void()> fn) {
+    runOnMain([alive = m_alive, callback = std::move(fn)]() {
+        if (alive->load()) {
+            callback();
+        }
+    });
+}
+
+void AppWindow::onWindowDestroyed(GtkWidget*, gpointer userData) {
+    auto* self = static_cast<AppWindow*>(userData);
+    // Widgets are gone; silence pending worker callbacks and ask the running
+    // conversion to stop. The thread itself is joined by the destructor.
+    self->m_alive->store(false);
+    self->m_window = nullptr;
+    self->requestCancel();
 }
 
 void AppWindow::present() {
@@ -191,6 +231,7 @@ void AppWindow::present() {
 
 void AppWindow::buildUi() {
     m_window = adw_application_window_new(GTK_APPLICATION(m_app));
+    g_signal_connect(m_window, "destroy", G_CALLBACK(AppWindow::onWindowDestroyed), this);
     gtk_window_set_title(GTK_WINDOW(m_window), "AppAlchemist");
     gtk_window_set_default_size(GTK_WINDOW(m_window), 1180, 820);
 
@@ -655,7 +696,14 @@ void AppWindow::startConversion() {
     request.optimizationSettings.compression = selectedCompression();
     request.dependencySettings.enabled = gtk_switch_get_active(GTK_SWITCH(m_dependencySwitch));
 
-    std::thread([this, request]() mutable {
+    // The worker is owned by the window (REL-HIGH-23): it is joined in
+    // shutdownWorker() instead of being detached, so the controller and the
+    // request outlive every callback that refers to them.
+    if (m_conversionThread.joinable()) {
+        m_conversionThread.join();
+    }
+
+    m_conversionThread = std::jthread([this, request](std::stop_token) mutable {
         ConversionController controller;
 
         {
@@ -669,7 +717,7 @@ void AppWindow::startConversion() {
                          [&controller, this](int index, int totalCount, const QString& packagePath) {
             const auto message = "Converting " + std::to_string(index + 1) + "/" + std::to_string(totalCount)
                 + ": " + std::filesystem::path(toStdString(packagePath)).filename().string();
-            runOnMain([this, message]() {
+            postToMain([this, message]() {
                 setStatus(message);
                 appendLog(message);
             });
@@ -678,7 +726,7 @@ void AppWindow::startConversion() {
         QObject::connect(&controller, &ConversionController::progress,
                          [this](int percentage, const QString& message) {
             const auto status = toStdString(message);
-            runOnMain([this, percentage, status]() {
+            postToMain([this, percentage, status]() {
                 setProgress(static_cast<double>(percentage) / 100.0);
                 setStatus(status);
             });
@@ -687,7 +735,7 @@ void AppWindow::startConversion() {
         QObject::connect(&controller, &ConversionController::log,
                          [this](const QString& message) {
             const auto text = toStdString(message);
-            runOnMain([this, text]() {
+            postToMain([this, text]() {
                 appendLog(text);
             });
         });
@@ -695,7 +743,7 @@ void AppWindow::startConversion() {
         QObject::connect(&controller, &ConversionController::error,
                          [this](const QString& message) {
             const auto text = toStdString(message);
-            runOnMain([this, text]() {
+            postToMain([this, text]() {
                 setStatus(text);
                 appendLog("ERROR: " + text);
             });
@@ -704,7 +752,7 @@ void AppWindow::startConversion() {
         QObject::connect(&controller, &ConversionController::success,
                          [this](const QString& appImagePath) {
             const auto text = toStdString(appImagePath);
-            runOnMain([this, text]() {
+            postToMain([this, text]() {
                 appendLog("Created " + text);
                 setStatus("AppImage created");
             });
@@ -712,7 +760,7 @@ void AppWindow::startConversion() {
 
         QObject::connect(&controller, &ConversionController::finished,
                          [&loop, this](int successCount, int failureCount, bool cancelled) {
-            runOnMain([this, successCount, failureCount, cancelled]() {
+            postToMain([this, successCount, failureCount, cancelled]() {
                 m_running = false;
                 if (cancelled) {
                     setStatus("Conversion cancelled.");
@@ -737,7 +785,7 @@ void AppWindow::startConversion() {
             const auto body = toStdString(reason) + "\n\nPackage: "
                 + std::filesystem::path(toStdString(packagePath)).filename().string();
 
-            runOnMain([this, &controller, title, body]() {
+            postToMain([this, &controller, title, body]() {
                 requestSecret(title, body, [&controller, this](const std::string& value, bool accepted) {
                     if (!accepted || value.empty()) {
                         appendLog("Continuing without sudo password.");
@@ -764,7 +812,7 @@ void AppWindow::startConversion() {
             std::lock_guard<std::mutex> lock(m_controllerMutex);
             m_activeController = nullptr;
         }
-    }).detach();
+    });
 }
 
 void AppWindow::startRepositorySearch() {

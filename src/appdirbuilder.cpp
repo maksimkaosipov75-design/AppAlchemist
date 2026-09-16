@@ -1320,6 +1320,10 @@ bool AppDirBuilder::createDesktopFile(const QString& appDirPath, const PackageMe
 }
 
 bool AppDirBuilder::fixDesktopFile(const QString& desktopPath, const PackageMetadata& metadata) {
+    // Kept in the signature for callers that pass metadata; the desktop entry
+    // is normalized purely from its own contents.
+    Q_UNUSED(metadata);
+
     QFile file(desktopPath);
     if (!file.open(QIODevice::ReadWrite | QIODevice::Text)) {
         qWarning() << "Failed to open .desktop file for fixing:" << desktopPath;
@@ -1492,6 +1496,36 @@ bool AppDirBuilder::copyIcon(const QString& appDirPath, const QString& iconPath,
     return true;
 }
 
+namespace {
+
+// The script path derived from a launcher is relative to wherever the package
+// installed the application, which is not necessarily where it ended up in the
+// AppDir. Fall back to locating the file by name so AppRun never points at a
+// path that does not exist.
+QString resolveAppDirRelativePath(const QString& appDirPath, const QString& candidate) {
+    if (candidate.isEmpty()) {
+        return candidate;
+    }
+    const QDir appDir(appDirPath);
+    if (QFileInfo::exists(appDir.absoluteFilePath(candidate))) {
+        return candidate;
+    }
+
+    const QString fileName = QFileInfo(candidate).fileName();
+    QDirIterator it(appDirPath, QStringList{fileName}, QDir::Files, QDirIterator::Subdirectories);
+    if (it.hasNext()) {
+        const QString found = it.next();
+        const QString relative = appDir.relativeFilePath(found);
+        qDebug() << "Resolved AppRun entry point" << candidate << "to" << relative;
+        return relative;
+    }
+
+    qWarning() << "Could not locate AppRun entry point inside AppDir:" << candidate;
+    return candidate;
+}
+
+} // namespace
+
 void AppDirBuilder::writeRuntimeModuleEnvironment(QTextStream& out, const QString& appDirPath) {
     const QDir appDir(appDirPath);
 
@@ -1522,6 +1556,65 @@ void AppDirBuilder::writeRuntimeModuleEnvironment(QTextStream& out, const QStrin
             out << "if [ -s \"${GDK_PIXBUF_RUNTIME_CACHE}\" ]; then\n";
             out << "    export GDK_PIXBUF_MODULE_FILE=\"${GDK_PIXBUF_RUNTIME_CACHE}\"\n";
             out << "fi\n";
+        }
+    }
+
+    // Qt applications that ship their own runtime keep the platform plugins
+    // next to it (…/plugins/platforms/libqxcb.so). Qt finds them relative to
+    // the executable, which no longer holds once the binary is staged into
+    // usr/bin, so point it at the directory explicitly.
+    {
+        QStringList pluginDirs;
+        QDirIterator pluginIt(appDirPath, QStringList{"platforms"}, QDir::Dirs | QDir::NoDotAndDotDot,
+                              QDirIterator::Subdirectories);
+        while (pluginIt.hasNext()) {
+            const QString platformsDir = pluginIt.next();
+            if (!QFileInfo::exists(platformsDir + "/libqxcb.so") &&
+                !QFileInfo::exists(platformsDir + "/libqwayland-generic.so")) {
+                continue;
+            }
+            const QString pluginsRoot = QFileInfo(platformsDir).absolutePath();
+            const QString relative = appDir.relativeFilePath(pluginsRoot);
+            if (!relative.startsWith("..") && !pluginDirs.contains(relative)) {
+                pluginDirs << relative;
+            }
+        }
+        if (!pluginDirs.isEmpty()) {
+            pluginDirs.sort();
+            QStringList expanded;
+            for (const QString& dir : pluginDirs) {
+                expanded << QString("${HERE}/%1").arg(dir);
+            }
+            const QString joined = expanded.join(":");
+            out << "export QT_PLUGIN_PATH=\"" << joined << "${QT_PLUGIN_PATH:+:${QT_PLUGIN_PATH}}\"\n";
+            out << "export QT_QPA_PLATFORM_PLUGIN_PATH=\"" << expanded.first() << "/platforms\"\n";
+        }
+    }
+
+    // Same for QML modules shipped with the application (…/qml/QtQuick/…).
+    {
+        QStringList qmlDirs;
+        QDirIterator qmlIt(appDirPath, QStringList{"qml"}, QDir::Dirs | QDir::NoDotAndDotDot,
+                           QDirIterator::Subdirectories);
+        while (qmlIt.hasNext()) {
+            const QString qmlDir = qmlIt.next();
+            if (!QDir(qmlDir + "/QtQuick").exists() && !QDir(qmlDir + "/QtQml").exists()) {
+                continue;
+            }
+            const QString relative = appDir.relativeFilePath(qmlDir);
+            if (!relative.startsWith("..") && !qmlDirs.contains(relative)) {
+                qmlDirs << relative;
+            }
+        }
+        if (!qmlDirs.isEmpty()) {
+            qmlDirs.sort();
+            QStringList expanded;
+            for (const QString& dir : qmlDirs) {
+                expanded << QString("${HERE}/%1").arg(dir);
+            }
+            const QString joined = expanded.join(":");
+            out << "export QML2_IMPORT_PATH=\"" << joined << "${QML2_IMPORT_PATH:+:${QML2_IMPORT_PATH}}\"\n";
+            out << "export QML_IMPORT_PATH=\"" << joined << "${QML_IMPORT_PATH:+:${QML_IMPORT_PATH}}\"\n";
         }
     }
 
@@ -2018,6 +2111,8 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
                     }
                 }
                 
+                pythonScriptPath = resolveAppDirRelativePath(appDirPath, pythonScriptPath);
+
                 // Run Python script with unbuffered output for better error messages
                 if (pythonInterpreter.startsWith("usr/") || pythonInterpreter.startsWith("opt/")) {
                     out << "exec \"${HERE}/" << pythonInterpreter << "\" -u \"${HERE}/" << pythonScriptPath << "\" \"$@\"\n";
@@ -2279,6 +2374,8 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
                     }
                 }
                 
+                pythonScriptPath = resolveAppDirRelativePath(appDirPath, pythonScriptPath);
+
                 // Run Python script with unbuffered output for better error messages
                 if (pythonInterpreter.startsWith("usr/") || pythonInterpreter.startsWith("opt/")) {
                     out << "exec \"${HERE}/" << pythonInterpreter << "\" -u \"${HERE}/" << pythonScriptPath << "\" \"$@\"\n";

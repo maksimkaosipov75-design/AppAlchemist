@@ -50,6 +50,13 @@ public:
     static QString generateHash(const QString& filePath);
     static bool setExecutable(const QString& filePath);
     static bool createHardLink(const QString& source, const QString& destination);
+
+    // True when `name` is a plain package name that can safely be handed to a
+    // package manager as an argument. Names come from untrusted package
+    // metadata (Depends:/Requires: fields, repository search results), so a
+    // value such as "-o" or "--config-file=/tmp/x" would otherwise be parsed
+    // as an option by apt/dnf/pacman (SEC-HIGH-11).
+    static bool isSafePackageName(const QString& name);
 };
 
 // Architecture detection utility
