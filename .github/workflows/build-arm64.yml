@@ -10,30 +10,37 @@ on:
 
 jobs:
   build-arm64:
-    runs-on: ubuntu-latest
+    # Native ARM64 runner. This job used to emulate aarch64 through QEMU, but
+    # linuxdeploy and appimagetool ship as static-pie binaries and qemu-user
+    # cannot execute those: every run died with "Exec format error" on a
+    # perfectly valid aarch64 file.
+    runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkg-config \
+            qt6-base-dev qt6-base-dev-tools \
+            libgtk-4-dev libadwaita-1-dev \
+            libarchive-dev libzstd-dev \
+            patchelf binutils wget file
 
       - name: Build ARM64 AppImage
         run: |
-          docker run --rm --platform linux/arm64 \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace \
-            ubuntu:24.04 bash -c "
-              apt-get update && \
-              apt-get install -y build-essential cmake qt6-base-dev qt6-base-dev-tools libgtk-4-dev libadwaita-1-dev libarchive-dev libzstd-dev patchelf binutils pkg-config wget file && \
-              chmod +x packaging/build-appimage-arm64.sh && \
-              ./packaging/build-appimage-arm64.sh
-            "
+          chmod +x packaging/build-appimage-arm64.sh
+          ./packaging/build-appimage-arm64.sh
+
+      - name: Verify the AppImage runs
+        run: |
+          APPIMAGE=releases/AppAlchemist-ARM64.AppImage
+          test -s "$APPIMAGE"
+          file "$APPIMAGE"
+          # The bundle must at least start and answer on its CLI route.
+          APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGE" --version
 
       - name: Upload ARM64 AppImage
         uses: actions/upload-artifact@v4
@@ -49,10 +56,3 @@ jobs:
           files: releases/AppAlchemist-ARM64.AppImage
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-
-
-
-
-
-
