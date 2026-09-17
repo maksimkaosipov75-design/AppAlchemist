@@ -20,6 +20,9 @@ struct CliOptions {
     bool json = false;
     bool quiet = false;
     bool dryRun = false;
+    // Fetch the packages this one declares as dependencies and put their
+    // contents into the bundle. Needs network access, so it stays opt-in.
+    bool bundleDependencies = false;
     bool autoLaunch = false;
     bool isBatch = false;
 };
@@ -76,6 +79,7 @@ private:
     bool m_json = false;
     bool m_quiet = false;
     bool m_dryRun = false;
+    bool m_bundleDependencies = false;
     bool m_success;
     QString m_resultAppImagePath;
     QString m_lastError;

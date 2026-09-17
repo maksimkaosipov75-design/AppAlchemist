@@ -784,6 +784,15 @@ bool AppDirBuilder::buildAppDir(const QString& appDirPath,
     }
 
     // Create AppRun
+    // Applications that compile their data prefix in look for it under /usr on
+    // the host, where the bundle's copy does not exist. Rewrite those
+    // references before the launcher is written, since it has to run the
+    // application from the directory the rewritten paths resolve against.
+    const QStringList relocatedPaths = relocatePackagePaths(appDirPath, metadata);
+    if (!relocatedPaths.isEmpty()) {
+        qDebug() << "Package paths made bundle-relative:" << relocatedPaths;
+    }
+
     if (!createAppRun(appDirPath, metadata)) {
         qWarning() << "Failed to create AppRun";
         return false;
@@ -949,12 +958,13 @@ bool AppDirBuilder::copyExecutables(const QString& appDirPath,
             }
             
             // Use universal path replacement
-            content = AppDetector::replaceScriptPaths(content, appBaseDir);
-            
-            // Fix the shebang line if path replacement injected ${HERE} into it -
-            // the kernel does not expand variables in shebangs. This must work for
-            // ANY interpreter (sh, bash, env, perl, python, ...), not just a few.
-            content.replace(QRegularExpression(R"(^#!\s*\$\{HERE\}/)"), "#!/");
+            const QString beforeRewrite = content;
+            content = AppDetector::replaceScriptPaths(content, appBaseDir, appDirPath);
+            if (content != beforeRewrite) {
+                // The rewritten references resolve against the bundle's usr
+                // directory, so the launcher has to start the application there.
+                m_relocatedPackagePaths = true;
+            }
             
             QFile targetFile(targetPath);
             if (!targetFile.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
@@ -1694,6 +1704,13 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
         appInfo.workingDir = "${HERE}/usr/bin";
     }
     
+    // When package paths were made bundle-relative, they resolve against the
+    // bundle's usr directory, so that is where the application has to start.
+    if (m_relocatedPackagePaths) {
+        appInfo.workingDir = "${HERE}/usr";
+        qDebug() << "Running from ${HERE}/usr so relocated package paths resolve";
+    }
+
     const CompatibilityFixes compatibilityFixes = CompatibilityRuleEngine::resolve(appInfo, metadata);
 
     // UNIVERSAL: Set up environment paths dynamically
@@ -2131,6 +2148,11 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
                 out << "# Shell script wrapper\n";
                 out << "export HERE=\"${HERE}\"\n";
                 out << "export APPDIR=\"${HERE}\"\n";
+                if (m_relocatedPackagePaths) {
+                    // References inside the script were made relative to the
+                    // bundle's usr directory, so start there.
+                    out << "cd \"${HERE}/usr\"\n";
+                }
                 // Check if script exists and is not just a test script
                 out << "if [ -f \"${HERE}/" << relativePath << "\" ]; then\n";
                 out << "    # Check if script actually does something useful (not just echo/debug)\n";
@@ -2387,6 +2409,11 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
                 out << "# Shell script wrapper\n";
                 out << "export HERE=\"${HERE}\"\n";
                 out << "export APPDIR=\"${HERE}\"\n";
+                if (m_relocatedPackagePaths) {
+                    // References inside the script were made relative to the
+                    // bundle's usr directory, so start there.
+                    out << "cd \"${HERE}/usr\"\n";
+                }
                 out << "exec \"${HERE}/" << relativePath << "\" \"$@\"\n";
             } else {
                 // Always change directory for games and opt applications
@@ -2432,6 +2459,332 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
     }
     
     return result;
+}
+
+namespace {
+
+// Directories that belong to every distribution rather than to one package.
+// Rewriting references to these would send the application away from the
+// host's icons, locales or schemas, so they are never relocated.
+bool isSharedSystemDirectory(const QString& name) {
+    static const QSet<QString> shared = {
+        "applications", "icons", "pixmaps", "mime", "locale", "doc", "man",
+        "info", "common-licenses", "licenses", "lintian", "help",
+        "metainfo", "appdata", "fonts", "themes", "dbus-1", "glib-2.0",
+        "bash-completion", "zsh", "polkit-1", "sounds", "cmake", "pkgconfig",
+        "gtk-3.0", "gtk-4.0", "gir-1.0", "girepository-1.0", "systemd",
+        "X11", "xml", "bug", "lintian", "menu", "terminfo", "vulkan"
+    };
+    return shared.contains(name);
+}
+
+bool looksLikeElf(const QString& path) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    return file.read(4) == QByteArrayLiteral("\x7f" "ELF");
+}
+
+// Replaces the leading "/usr" of each owned path with "././", which is the
+// same length: the rest of the path survives untouched, so a reference such as
+// /usr/share/app/ui/main.ui becomes ././share/app/ui/main.ui and resolves
+// against the bundle's usr directory. Equal length matters in binaries, where
+// anything else would shift or truncate the string.
+bool rewriteReferences(const QString& filePath, const QList<QByteArray>& ownedPaths) {
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    QByteArray content = file.readAll();
+    file.close();
+
+    static const QByteArray absolutePrefix = QByteArrayLiteral("/usr");
+    static const QByteArray relativePrefix = QByteArrayLiteral("././");
+
+    bool changed = false;
+    for (const QByteArray& owned : ownedPaths) {
+        int index = content.indexOf(owned);
+        while (index >= 0) {
+            content.replace(index, absolutePrefix.size(), relativePrefix);
+            changed = true;
+            index = content.indexOf(owned, index + owned.size());
+        }
+    }
+
+    if (!changed) {
+        return false;
+    }
+
+    const QFile::Permissions permissions = QFileInfo(filePath).permissions();
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return false;
+    }
+    const bool written = file.write(content) == content.size();
+    file.close();
+    if (written) {
+        QFile::setPermissions(filePath, permissions);
+    }
+    return written;
+}
+
+// A file is treated as a script when it contains no binary data: sourced
+// fragments have no shebang, so requiring one would miss exactly the helpers
+// that packages split their launchers into.
+bool looksLikeText(const QString& path) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    const QByteArray head = file.read(512);
+    return !head.isEmpty() && !head.contains('\0');
+}
+
+// Collects absolute references a script makes to files that the bundle does
+// not contain. Packages routinely rely on helpers installed by a dependency
+// (a Java wrapper, a shared launcher fragment); without them the application
+// dies on the first line that sources the missing file.
+QStringList unresolvedReferencesIn(const QString& filePath, const QString& appDirPath) {
+    QStringList missing;
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return missing;
+    }
+    if (file.read(512).contains('\0')) {
+        return missing;   // binary, not a script
+    }
+    file.seek(0);
+    const QString content = QString::fromUtf8(file.readAll());
+    file.close();
+
+    static const QRegularExpression pathPattern(
+        R"((/usr/(?:share|lib|lib64|libexec)/[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)*))");
+    QRegularExpressionMatchIterator it = pathPattern.globalMatch(content);
+    while (it.hasNext()) {
+        const QString absolute = it.next().captured(1);
+        if (missing.contains(absolute)) {
+            continue;
+        }
+        if (isSharedSystemDirectory(absolute.section('/', 3, 3))) {
+            continue;   // belongs to the distribution, not to this package
+        }
+        if (QFileInfo::exists(appDirPath + absolute)) {
+            continue;   // already inside the bundle
+        }
+        if (!QFileInfo::exists(absolute)) {
+            continue;   // not on this machine either, nothing to take
+        }
+        missing << absolute;
+    }
+    return missing;
+}
+
+// Copies such a reference into the bundle. Directories are taken whole, within
+// reason: a helper package is small, and anything large is more likely to be a
+// runtime that belongs to the host.
+bool importHostReference(const QString& absolutePath, const QString& appDirPath) {
+    const QFileInfo source(absolutePath);
+    const QString destination = appDirPath + absolutePath;
+    QDir().mkpath(QFileInfo(destination).absolutePath());
+
+    if (source.isDir()) {
+        qint64 total = 0;
+        QDirIterator sizeIt(absolutePath, QDir::Files, QDirIterator::Subdirectories);
+        while (sizeIt.hasNext()) {
+            total += QFileInfo(sizeIt.next()).size();
+            if (total > 64LL * 1024 * 1024) {
+                qWarning() << "Not importing" << absolutePath << ": larger than 64 MiB";
+                return false;
+            }
+        }
+        return SubprocessWrapper::copyDirectory(absolutePath, destination);
+    }
+
+    return SubprocessWrapper::copyFile(absolutePath, destination);
+}
+
+} // namespace
+
+QStringList AppDirBuilder::relocatePackagePaths(const QString& appDirPath,
+                                                const PackageMetadata& metadata) {
+    QStringList relocated;
+    const QDir appDir(appDirPath);
+
+    // The package's own directories are the ones named after it. Both the
+    // package name and the executable name are considered, because the two
+    // frequently differ, and nothing here is specific to any application.
+    QStringList names;
+    if (!metadata.package.trimmed().isEmpty()) {
+        names << metadata.package.trimmed();
+    }
+    const QString execName = QFileInfo(metadata.mainExecutable).fileName();
+    if (!execName.isEmpty() && !names.contains(execName)) {
+        names << execName;
+    }
+    for (const QString& executable : metadata.executables) {
+        const QString candidate = QFileInfo(executable).fileName();
+        if (!candidate.isEmpty() && !names.contains(candidate)) {
+            names << candidate;
+        }
+    }
+    if (names.isEmpty()) {
+        return relocated;
+    }
+
+    static const QStringList prefixes = {
+        "usr/share", "usr/lib", "usr/libexec", "usr/lib64", "opt"
+    };
+
+    // Before deciding what to rewrite, bring in whatever the package refers to
+    // but does not ship. These come from dependencies that were installed
+    // separately on the machine the package was built for.
+    QStringList importedPaths;
+    // Scripts live wherever the package put them, and helper fragments sourced
+    // by a launcher usually sit next to the library they belong to.
+    static const QStringList scriptRoots = {
+        "usr/bin", "usr/sbin", "usr/games", "usr/libexec", "usr/lib", "usr/share", "opt"
+    };
+    for (const QString& root : scriptRoots) {
+        const QString fullRoot = appDir.absoluteFilePath(root);
+        if (!QDir(fullRoot).exists()) {
+            continue;
+        }
+        QDirIterator scriptIt(fullRoot, QDir::Files | QDir::NoSymLinks, QDirIterator::Subdirectories);
+        while (scriptIt.hasNext()) {
+            const QString script = scriptIt.next();
+            for (const QString& reference : unresolvedReferencesIn(script, appDirPath)) {
+                if (importedPaths.contains(reference)) {
+                    continue;
+                }
+                if (importHostReference(reference, appDirPath)) {
+                    importedPaths << reference;
+                    qDebug() << "Imported" << reference << "from the host: the package refers to it but does not ship it";
+                }
+            }
+        }
+    }
+
+    // Only paths under /usr can be relocated: the rewrite keeps the string
+    // length, which works because "/usr" and "././" are both four bytes.
+    QList<QByteArray> ownedPaths;
+    for (const QString& prefix : prefixes) {
+        if (!prefix.startsWith("usr/")) {
+            continue;
+        }
+        for (const QString& name : names) {
+            const QString relative = QString("%1/%2").arg(prefix, name);
+            if (isSharedSystemDirectory(QFileInfo(relative).fileName())) {
+                continue;
+            }
+            if (!QDir(appDir.absoluteFilePath(relative)).exists()) {
+                continue;
+            }
+            const QString absolute = "/" + relative;
+            const QByteArray encoded = absolute.toUtf8();
+            if (!ownedPaths.contains(encoded)) {
+                ownedPaths.append(encoded);
+                relocated << absolute;
+            }
+        }
+    }
+
+    for (const QString& imported : importedPaths) {
+        const QByteArray encoded = imported.toUtf8();
+        if (!ownedPaths.contains(encoded)) {
+            ownedPaths.append(encoded);
+            relocated << imported;
+        }
+    }
+
+    // Anything else the package's scripts point at that the bundle now
+    // contains: resources and dependency contents land in the AppDir after the
+    // scripts were first processed, so this is where those references are
+    // caught. Directories shared with the distribution are left alone, or the
+    // application would lose the host's icons and translations.
+    for (const QString& root : scriptRoots) {
+        const QString fullRoot = appDir.absoluteFilePath(root);
+        if (!QDir(fullRoot).exists()) {
+            continue;
+        }
+        QDirIterator scriptIt(fullRoot, QDir::Files | QDir::NoSymLinks, QDirIterator::Subdirectories);
+        while (scriptIt.hasNext()) {
+            const QString script = scriptIt.next();
+            if (!looksLikeText(script)) {
+                continue;
+            }
+            QFile file(script);
+            if (!file.open(QIODevice::ReadOnly)) {
+                continue;
+            }
+            const QString content = QString::fromUtf8(file.readAll());
+            file.close();
+
+            static const QRegularExpression referencePattern(
+                R"((/usr/(?:share|lib|lib64|libexec)/[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)*))");
+            QRegularExpressionMatchIterator matches = referencePattern.globalMatch(content);
+            while (matches.hasNext()) {
+                const QString reference = matches.next().captured(1);
+                const QString topLevel = reference.section('/', 3, 3);
+                if (isSharedSystemDirectory(topLevel)) {
+                    continue;
+                }
+                if (!QFileInfo::exists(appDirPath + reference)) {
+                    continue;
+                }
+                const QByteArray encoded = reference.toUtf8();
+                if (!ownedPaths.contains(encoded)) {
+                    ownedPaths.append(encoded);
+                    relocated << reference;
+                }
+            }
+        }
+    }
+
+    if (ownedPaths.isEmpty()) {
+        return relocated;
+    }
+
+    // Only the files the package itself brought in are rewritten; bundled host
+    // libraries are added later and must keep pointing at the host.
+    static const QStringList searchRoots = {
+        "usr/bin", "usr/sbin", "usr/games", "usr/libexec", "usr/lib", "opt", "usr/share"
+    };
+
+    int patchedFiles = 0;
+    for (const QString& root : searchRoots) {
+        const QString fullRoot = appDir.absoluteFilePath(root);
+        if (!QDir(fullRoot).exists()) {
+            continue;
+        }
+        QDirIterator it(fullRoot, QDir::Files | QDir::NoSymLinks, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            const QString candidate = it.next();
+            const QFileInfo info(candidate);
+            if (info.size() <= 0 || info.size() > 512LL * 1024 * 1024) {
+                continue;
+            }
+            const bool binary = looksLikeElf(candidate);
+            if (!binary && !info.isExecutable() && info.suffix().toLower() != "sh") {
+                // Data files are left alone unless they are scripts.
+                const QString name = info.fileName();
+                if (!name.endsWith(".py") && !name.endsWith(".pl") && !name.endsWith(".desktop")) {
+                    continue;
+                }
+            }
+            if (rewriteReferences(candidate, ownedPaths)) {
+                patchedFiles++;
+            }
+        }
+    }
+
+    if (patchedFiles > 0) {
+        m_relocatedPackagePaths = true;
+        qDebug() << "Relocated package paths" << relocated << "in" << patchedFiles << "files";
+    } else {
+        relocated.clear();
+    }
+
+    return relocated;
 }
 
 QString AppDirBuilder::findAppImageTool() {

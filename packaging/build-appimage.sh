@@ -3,7 +3,9 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-BUILD_DIR="$PROJECT_DIR/build"
+# A directory of its own: packaging configures the project without tests, and
+# reusing the developer's build directory silently turned their test suite off.
+BUILD_DIR="$PROJECT_DIR/build-appimage"
 PACKAGE_DIR="$PROJECT_DIR/packaging"
 OUTPUT_DIR="$PROJECT_DIR/releases"
 
@@ -318,6 +320,15 @@ if [ -d "/usr/lib/gtk-4.0/4.0.0/immodules" ]; then
     fi
 fi
 
+# linuxdeploy replaces the root icon with a symlink into the hicolor tree,
+# which leaves the AppImage advertising a 64x64 picture. Put a real, properly
+# sized file back so file managers and .DirIcon get a usable icon.
+rm -f "$APPDIR/appalchemist.png" "$APPDIR/.DirIcon"
+if [ -f "$ICON_SRC" ]; then
+    cp "$ICON_SRC" "$APPDIR/appalchemist.png"
+    cp "$ICON_SRC" "$APPDIR/.DirIcon"
+fi
+
 # Create/update AppRun script for the GTK-first executable.
 # linuxdeploy may leave AppRun as a symlink to usr/bin/appalchemist-gui.
 # Remove it first so we don't accidentally overwrite the main binary.
@@ -412,7 +423,26 @@ if [ -d "${HERE}/usr/share/applications" ]; then
             cp "${HERE}/usr/bin/appalchemist-wrapper" "${HOME}/.local/bin/appalchemist-wrapper" 2>/dev/null || true
             chmod +x "${HOME}/.local/bin/appalchemist-wrapper" 2>/dev/null || true
         fi
-        
+
+        # Install the icon the desktop entries refer to. Without it the
+        # launcher resolves Icon=appalchemist to nothing and shows a blank
+        # entry, which is what happened before this was added.
+        for ICON_SIZE in 16 32 48 64 128 256 512; do
+            ICON_SRC="${HERE}/usr/share/icons/hicolor/${ICON_SIZE}x${ICON_SIZE}/apps/appalchemist.png"
+            if [ -f "${ICON_SRC}" ]; then
+                ICON_DEST="${HOME}/.local/share/icons/hicolor/${ICON_SIZE}x${ICON_SIZE}/apps"
+                mkdir -p "${ICON_DEST}" 2>/dev/null || true
+                cp "${ICON_SRC}" "${ICON_DEST}/appalchemist.png" 2>/dev/null || true
+            fi
+        done
+        if [ -f "${HERE}/usr/share/pixmaps/appalchemist.png" ]; then
+            mkdir -p "${HOME}/.local/share/pixmaps" 2>/dev/null || true
+            cp "${HERE}/usr/share/pixmaps/appalchemist.png" "${HOME}/.local/share/pixmaps/" 2>/dev/null || true
+        fi
+        if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+            gtk-update-icon-cache -f -t "${HOME}/.local/share/icons/hicolor" 2>/dev/null || true
+        fi
+
         if command -v update-desktop-database >/dev/null 2>&1; then
             update-desktop-database "${HOME}/.local/share/applications" 2>/dev/null || true
         fi

@@ -1512,7 +1512,18 @@ QStringList DependencyResolver::extractLibraries(const QString& packagePath, con
     };
     
     findLibs(dataDir, dataDir);
-    
+
+    // A dependency is more than its shared libraries. Packages routinely rely
+    // on a helper script, an interpreter or data files installed by another
+    // package, and without them the application fails on its first line. Copy
+    // the rest of the payload as well, preserving the layout so the references
+    // inside the application keep matching.
+    if (m_settings.enabled) {
+        if (SubprocessWrapper::copyDirectory(dataDir, outputDir)) {
+            emit log("  Bundled the remaining package contents");
+        }
+    }
+
     // Cleanup
     SubprocessWrapper::removeDirectory(tempExtract);
     

@@ -1,3 +1,12 @@
+appalchemist (1.7.0-1) unstable; urgency=medium
+
+  * Resolve data paths compiled into applications so bundles find their own
+    files instead of looking for them on the host.
+  * Install the icon the desktop entries refer to.
+  * Add --bundle-deps to fetch and bundle declared dependencies.
+
+ -- AppAlchemist Team <appalchemist@example.com>  Thu, 18 Sep 2026 00:00:00 +0000
+
 appalchemist (1.6.1-1) unstable; urgency=medium
 
   * Point AppRun at the application binary of Electron packages instead of

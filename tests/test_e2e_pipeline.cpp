@@ -406,3 +406,79 @@ TEST_CASE("Electron AppRun targets the application, not its CLI wrapper",
         REQUIRE_FALSE(content.contains("/bin/chatclient\""));
     }
 }
+
+TEST_CASE("Data paths compiled into an application are made bundle-relative",
+          "[appdir][relocation]") {
+    // Ordinary applications resolve their data through the prefix they were
+    // built with: /usr/share/<name>/... . Inside a bundle that path belongs to
+    // the host, where the file does not exist, and the application dies at
+    // startup. The reference is rewritten to resolve inside the bundle.
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+    const QString appDirPath = tempDir.path() + "/AppDir";
+    const QString extracted = tempDir.path() + "/extracted";
+
+    REQUIRE(QDir().mkpath(extracted + "/data/usr/bin"));
+    REQUIRE(QDir().mkpath(extracted + "/data/usr/share/sampletool/ui"));
+    REQUIRE(QDir().mkpath(extracted + "/data/usr/share/applications"));
+
+    // A binary that refers to its data directory by absolute path, the way a
+    // compiled-in prefix appears in a real executable.
+    const QString binary = extracted + "/data/usr/bin/sampletool";
+    REQUIRE(TestHelpers::createSampleElf(binary));
+    QFile bin(binary);
+    REQUIRE(bin.open(QIODevice::Append));
+    bin.write(QByteArray("/usr/share/sampletool/ui/main.ui", 32));
+    bin.write(QByteArray(1, '\0'));
+    bin.close();
+    REQUIRE(SubprocessWrapper::setExecutable(binary));
+
+    QFile uiFile(extracted + "/data/usr/share/sampletool/ui/main.ui");
+    REQUIRE(uiFile.open(QIODevice::WriteOnly | QIODevice::Text));
+    uiFile.write("<interface/>\n");
+    uiFile.close();
+
+    QFile desktop(extracted + "/data/usr/share/applications/sampletool.desktop");
+    REQUIRE(desktop.open(QIODevice::WriteOnly | QIODevice::Text));
+    desktop.write("[Desktop Entry]\nType=Application\nName=Sample\nExec=sampletool\nIcon=sampletool\n");
+    desktop.close();
+
+    PackageMetadata meta;
+    meta.package = "sampletool";
+    meta.mainExecutable = extracted + "/data/usr/bin/sampletool";
+    meta.executables = {extracted + "/data/usr/bin/sampletool"};
+
+    AppDirBuilder builder;
+    REQUIRE(builder.buildAppDir(appDirPath, extracted, meta, {}));
+
+    QFile staged(appDirPath + "/usr/bin/sampletool");
+    REQUIRE(staged.open(QIODevice::ReadOnly));
+    const QByteArray content = staged.readAll();
+    staged.close();
+
+    SECTION("the absolute reference is gone") {
+        REQUIRE_FALSE(content.contains("/usr/share/sampletool"));
+    }
+
+    SECTION("it is replaced by a relative one of the same length") {
+        // "/usr" becomes "././", which keeps the byte count identical: the
+        // empty component of the resulting "././/share/..." is ignored when
+        // the path is resolved.
+        REQUIRE(content.contains("././/share/sampletool/ui/main.ui"));
+    }
+
+    SECTION("the launcher runs the application where that path resolves") {
+        QFile appRun(appDirPath + "/AppRun");
+        REQUIRE(appRun.open(QIODevice::ReadOnly | QIODevice::Text));
+        const QString script = appRun.readAll();
+        appRun.close();
+        INFO("AppRun:\n" << script.toStdString());
+        REQUIRE(script.contains("cd \"${HERE}/usr\""));
+    }
+
+    SECTION("shared system directories keep pointing at the host") {
+        // Rewriting /usr/share/icons or /usr/share/locale would send the
+        // application away from the host's themes and translations.
+        REQUIRE_FALSE(content.contains("././share/icons"));
+    }
+}

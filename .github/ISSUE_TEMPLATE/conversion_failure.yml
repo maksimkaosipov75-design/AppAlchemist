@@ -7,7 +7,7 @@ body:
     id: appalchemist-version
     attributes:
       label: AppAlchemist version
-      placeholder: "1.6.1"
+      placeholder: "1.7.0"
     validations:
       required: true
   - type: input

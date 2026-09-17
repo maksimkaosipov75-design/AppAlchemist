@@ -54,6 +54,10 @@ int main(int argc, char** argv) {
         "Inspect package without building AppImage");
     parser.addOption(dryRunOption);
 
+    QCommandLineOption bundleDepsOption("bundle-deps",
+        "Fetch the package's declared dependencies and bundle their contents (requires network)");
+    parser.addOption(bundleDepsOption);
+
     parser.addPositionalArgument("files", "Package files to convert (.deb, .rpm, .tar.gz, .zip, etc.)", "[files...]");
 
     if (!parser.parse(QCoreApplication::arguments())) {
@@ -75,6 +79,7 @@ int main(int argc, char** argv) {
     opts.json = parser.isSet(jsonOption);
     opts.quiet = parser.isSet(quietOption);
     opts.dryRun = parser.isSet(dryRunOption);
+    opts.bundleDependencies = parser.isSet(bundleDepsOption);
     opts.autoLaunch = !parser.isSet(noLaunchOption);
     opts.outputDir = parser.value(outputOption);
 

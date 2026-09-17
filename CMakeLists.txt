@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(appalchemist VERSION 1.6.1 LANGUAGES CXX)
+project(appalchemist VERSION 1.7.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -235,15 +235,20 @@ endif()
 # Common Assets & Resources Installation
 # ----------------------------------------------------------------------------
 if(EXISTS "${CMAKE_SOURCE_DIR}/assets/icons/appalchemist.png")
-    install(FILES assets/icons/appalchemist.png
+    # Desktop environments trust the directory name, so each hicolor size must
+    # receive an image of exactly that size. Installing the master everywhere
+    # put a 1024x1024 picture into 16x16 and broke icon lookup.
+    install(FILES assets/icons/appalchemist-256.png
         DESTINATION share/pixmaps
         RENAME appalchemist.png
     )
-    foreach(SIZE 16 32 48 64 128 256)
-        install(FILES assets/icons/appalchemist.png
-            DESTINATION share/icons/hicolor/${SIZE}x${SIZE}/apps
-            RENAME appalchemist.png
-        )
+    foreach(SIZE 16 32 48 64 128 256 512)
+        if(EXISTS "${CMAKE_SOURCE_DIR}/assets/icons/appalchemist-${SIZE}.png")
+            install(FILES assets/icons/appalchemist-${SIZE}.png
+                DESTINATION share/icons/hicolor/${SIZE}x${SIZE}/apps
+                RENAME appalchemist.png
+            )
+        endif()
     endforeach()
 endif()
 

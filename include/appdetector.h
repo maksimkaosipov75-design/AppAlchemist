@@ -63,9 +63,14 @@ public:
     // Find Python interpreter
     static QString findPythonInterpreter(const QString& appDirPath);
     
-    // Universal script path replacement
+    // Rewrites absolute references inside a script so they resolve inside the
+    // bundle. The result is relative to the bundle's usr directory, which the
+    // generated launcher changes into: unlike a ${HERE} substitution this works
+    // in any language, not just in shell scripts. Only paths that actually
+    // exist in the AppDir are touched, so references to host tools survive.
     static QString replaceScriptPaths(const QString& scriptContent, 
-                                     const QString& appBaseDir);
+                                     const QString& appBaseDir,
+                                      const QString& appDirPath = QString());
     
     // Find Electron binary location
     static QString findElectronBinary(const QString& baseDir);

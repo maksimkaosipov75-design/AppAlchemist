@@ -217,6 +217,14 @@ if [ "$QT_BUNDLED" = false ]; then
 fi
 
 # Create/update AppRun script with Qt environment variables and desktop file registration
+# Put a real, properly sized icon at the AppDir root: linuxdeploy replaces it
+# with a symlink into the hicolor tree, leaving a 64x64 picture behind.
+rm -f "$APPDIR/appalchemist.png" "$APPDIR/.DirIcon"
+if [ -f "$ICON_SRC" ]; then
+    cp "$ICON_SRC" "$APPDIR/appalchemist.png"
+    cp "$ICON_SRC" "$APPDIR/.DirIcon"
+fi
+
 cat > "$APPDIR/AppRun" << 'EOF'
 #!/bin/bash
 HERE="$(dirname "$(readlink -f "${0}")")"
@@ -263,6 +271,19 @@ if [ -d "${HERE}/usr/share/applications" ]; then
     # Register desktop files (for file associations)
     if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database "${HOME}/.local/share/applications" 2>/dev/null || true
+    fi
+
+    # Install the icon the desktop entries refer to: without it the launcher
+    # resolves Icon=appalchemist to nothing and shows a blank entry.
+    for ICON_SIZE in 16 32 48 64 128 256 512; do
+        ICON_FILE="${HERE}/usr/share/icons/hicolor/${ICON_SIZE}x${ICON_SIZE}/apps/appalchemist.png"
+        if [ -f "${ICON_FILE}" ]; then
+            mkdir -p "${HOME}/.local/share/icons/hicolor/${ICON_SIZE}x${ICON_SIZE}/apps" 2>/dev/null || true
+            cp "${ICON_FILE}" "${HOME}/.local/share/icons/hicolor/${ICON_SIZE}x${ICON_SIZE}/apps/appalchemist.png" 2>/dev/null || true
+        fi
+    done
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -f -t "${HOME}/.local/share/icons/hicolor" 2>/dev/null || true
     fi
     
     # Copy desktop handlers to user's applications directory for file associations

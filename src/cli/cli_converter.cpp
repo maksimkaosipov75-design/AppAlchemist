@@ -270,6 +270,7 @@ int CliConverter::convert(const CliOptions& options) {
     m_json = options.json;
     m_quiet = options.quiet;
     m_dryRun = options.dryRun;
+    m_bundleDependencies = options.bundleDependencies;
     m_success = false;
     m_lastError.clear();
     m_resultAppImagePath.clear();
@@ -396,7 +397,7 @@ int CliConverter::convert(const CliOptions& options) {
     
     DependencySettings dependencySettings;
     dependencySettings.bundleSystemLibraries = true;
-    dependencySettings.enabled = false;
+    dependencySettings.enabled = m_bundleDependencies;
     m_pipeline->setDependencySettings(dependencySettings);
     
     OptimizationSettings optimizationSettings;

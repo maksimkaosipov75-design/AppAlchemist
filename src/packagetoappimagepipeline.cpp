@@ -822,6 +822,21 @@ bool PackageToAppImagePipeline::analyzeDependencies() {
             emit log(QString("Added %1 libraries from dependencies").arg(additionalLibs.size()));
             m_libraries.append(additionalLibs);
         }
+
+        // Dependencies bring more than shared libraries: launcher fragments,
+        // interpreters, data. A package whose script sources a helper from
+        // another package cannot start without it, so merge whatever was
+        // fetched into the extracted tree and let the AppDir builder treat it
+        // like the package's own content.
+        const QString fetchedRoot = m_tempDir + "/staged_deps";
+        if (QDir(fetchedRoot).exists() && fetchedRoot != m_appDirPath) {
+            const QString mergeTarget = QDir(m_extractedPackageDir).exists(QStringLiteral("data"))
+                ? m_extractedPackageDir + "/data"
+                : m_extractedPackageDir;
+            if (SubprocessWrapper::copyDirectory(fetchedRoot, mergeTarget)) {
+                emit log("Merged dependency contents into the bundle");
+            }
+        }
     }
     
     return true;

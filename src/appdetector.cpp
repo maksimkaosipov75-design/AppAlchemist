@@ -425,39 +425,73 @@ QString AppDetector::findPythonInterpreter(const QString& appDirPath) {
 }
 
 QString AppDetector::replaceScriptPaths(const QString& scriptContent,
-                                        const QString& appBaseDir) {
-    QString result = scriptContent;
-    
-    // Replace common absolute paths with ${HERE} relative paths
-    // This is a universal replacement that works for most scripts
-    
-    // Replace /usr/lib/ paths (but preserve ${HERE}/usr/lib/)
-    result.replace(QRegularExpression(R"((?<!\$\{HERE\})/usr/lib/)"), "${HERE}/usr/lib/");
-    
-    // Replace /usr/bin/ paths
-    result.replace(QRegularExpression(R"((?<!\$\{HERE\})/usr/bin/)"), "${HERE}/usr/bin/");
-    
-    // Replace /opt/ paths
-    result.replace(QRegularExpression(R"((?<!\$\{HERE\})/opt/)"), "${HERE}/opt/");
-    
-    // Replace /usr/share/ paths
-    result.replace(QRegularExpression(R"((?<!\$\{HERE\})/usr/share/)"), "${HERE}/usr/share/");
-    
-    // Replace specific app base directory paths
-    if (!appBaseDir.isEmpty()) {
-        QString absBasePath = QString("/%1/").arg(appBaseDir);
-        QString hereBasePath = QString("${HERE}/%1/").arg(appBaseDir);
-        result.replace(absBasePath, hereBasePath);
+                                       const QString& appBaseDir,
+                                       const QString& appDirPath) {
+    // A ${HERE} substitution only works in shell scripts; a Perl, Python or
+    // Ruby script keeps it as literal text and then looks for a directory that
+    // cannot exist. A path relative to the bundle's usr directory works in
+    // every language, because the launcher starts the application there.
+    QStringList lines = scriptContent.split('\n');
+    if (lines.isEmpty()) {
+        return scriptContent;
     }
-    
-    // Replace common variable assignments
-    result.replace(QRegularExpression(R"((ELECTRON_BIN|APP_DIR|INSTALL_DIR)=([^:]*):-?/usr/lib/)"), 
-                  R"(\1=\2:-${HERE}/usr/lib/)");
-    
-    // Replace cp commands with absolute paths
-    result.replace(QRegularExpression(R"(cp\s+/usr/lib/)"), "cp ${HERE}/usr/lib/");
-    result.replace(QRegularExpression(R"(cp\s+/opt/)"), "cp ${HERE}/opt/");
-    
+
+    // Anything that exists inside the bundle is rewritten; references to host
+    // tools (/usr/bin/env, /bin/sh, an interpreter that was not bundled) are
+    // left alone so they keep working.
+    auto existsInBundle = [&appDirPath](const QString& absolutePath) {
+        if (appDirPath.isEmpty()) {
+            return true;
+        }
+        const QString relative = absolutePath.mid(1);
+        const QString candidate = QString("%1/%2").arg(appDirPath, relative);
+        return QFileInfo::exists(candidate);
+    };
+
+    static const QRegularExpression pathPattern(
+        R"((?<!\$\{HERE\})(?<!\.)(/usr/(?:share|lib|lib64|libexec|bin|sbin|games)/[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)*))");
+
+    for (int i = 0; i < lines.size(); ++i) {
+        // The kernel does not expand anything in a shebang and cannot follow a
+        // relative interpreter, so the first line stays as it is.
+        if (i == 0 && lines[i].startsWith("#!")) {
+            continue;
+        }
+
+        QString& line = lines[i];
+        QRegularExpressionMatchIterator it = pathPattern.globalMatch(line);
+        QList<QPair<int, QString>> edits;
+        while (it.hasNext()) {
+            const QRegularExpressionMatch match = it.next();
+            const QString absolutePath = match.captured(1);
+            if (!existsInBundle(absolutePath)) {
+                continue;
+            }
+            // /usr/share/app -> ././share/app, same length, resolved from the
+            // bundle's usr directory.
+            QString relativePath = absolutePath;
+            relativePath.replace(0, 4, "././");
+            edits.append({match.capturedStart(1), relativePath});
+        }
+
+        for (int e = edits.size() - 1; e >= 0; --e) {
+            const int position = edits[e].first;
+            const QString& replacement = edits[e].second;
+            line.replace(position, replacement.size(), replacement);
+        }
+    }
+
+    QString result = lines.join('\n');
+
+    // The application's own directory, when it lives somewhere this pattern
+    // does not cover.
+    if (!appBaseDir.isEmpty() && appBaseDir.startsWith("usr/")) {
+        const QString absBasePath = QString("/%1/").arg(appBaseDir);
+        QString relativeBasePath = absBasePath;
+        relativeBasePath.replace(0, 4, "././");
+        result.replace(absBasePath, relativeBasePath);
+    }
+
     return result;
 }
 
