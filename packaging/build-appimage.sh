@@ -442,10 +442,13 @@ cd "$OUTPUT_DIR"
 
 # Use bundled appimagetool if available, otherwise try system one
 APPIMAGETOOL=""
-if [ -f "$APPDIR/usr/lib/appalchemist/appimagetool" ]; then
-    APPIMAGETOOL="$APPDIR/usr/lib/appalchemist/appimagetool"
-elif [ -f "$PROJECT_DIR/thirdparty/appimagetool" ]; then
+# Prefer the untouched download: linuxdeploy processes everything inside the
+# AppDir and can strip the copy bundled there, which destroys the squashfs
+# payload appended to that AppImage.
+if [ -f "$PROJECT_DIR/thirdparty/appimagetool" ]; then
     APPIMAGETOOL="$PROJECT_DIR/thirdparty/appimagetool"
+elif [ -f "$APPDIR/usr/lib/appalchemist/appimagetool" ]; then
+    APPIMAGETOOL="$APPDIR/usr/lib/appalchemist/appimagetool"
 elif command -v appimagetool >/dev/null 2>&1; then
     APPIMAGETOOL="appimagetool"
 else

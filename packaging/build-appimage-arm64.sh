@@ -90,12 +90,6 @@ mkdir -p "$PROJECT_DIR/thirdparty"
 fetch_tool "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-aarch64.AppImage" \
     "$PROJECT_DIR/thirdparty/appimagetool-aarch64.AppImage"
 
-# Copy appimagetool for ARM64
-if [ -f "$PROJECT_DIR/thirdparty/appimagetool-aarch64.AppImage" ]; then
-    echo "Copying bundled appimagetool for ARM64..."
-    cp "$PROJECT_DIR/thirdparty/appimagetool-aarch64.AppImage" "$APPDIR/usr/lib/appalchemist/appimagetool"
-    chmod +x "$APPDIR/usr/lib/appalchemist/appimagetool"
-fi
 
 # Copy desktop file
 cp "$PACKAGE_DIR/appalchemist.desktop" "$APPDIR/usr/share/applications/"
@@ -122,6 +116,10 @@ cp "$PACKAGE_DIR/mime/rpm-package.xml" "$APPDIR/usr/share/mime/packages/"
 
 # Create .desktop file in AppDir root (required by appimagetool and linuxdeploy)
 cp "$APPDIR/usr/share/applications/appalchemist.desktop" "$APPDIR/"
+# The installed entry point is "appalchemist"; the wrapper of the x86_64
+# recipe does not exist here, and linuxdeploy resolves Exec= against the
+# binaries it finds in the AppDir.
+sed -i "s|^Exec=.*|Exec=appalchemist|" "$APPDIR/appalchemist.desktop"
 
 # Download linuxdeploy and Qt plugin for ARM64 if not available
 THIRDPARTY_DIR="$PROJECT_DIR/thirdparty"
@@ -296,11 +294,19 @@ chmod +x "$APPDIR/AppRun"
 mkdir -p "$OUTPUT_DIR"
 cd "$OUTPUT_DIR"
 
+# Bundle appimagetool now that linuxdeploy has finished touching the AppDir,
+# so the copy that ships with the application keeps its squashfs payload.
+if [ -f "$PROJECT_DIR/thirdparty/appimagetool-aarch64.AppImage" ]; then
+    echo "Bundling appimagetool for ARM64..."
+    mkdir -p "$APPDIR/usr/lib/appalchemist"
+    cp "$PROJECT_DIR/thirdparty/appimagetool-aarch64.AppImage" "$APPDIR/usr/lib/appalchemist/appimagetool"
+    chmod +x "$APPDIR/usr/lib/appalchemist/appimagetool"
+fi
+
 # Use bundled appimagetool for ARM64
 APPIMAGETOOL=""
-if [ -f "$APPDIR/usr/lib/appalchemist/appimagetool" ]; then
-    APPIMAGETOOL="$APPDIR/usr/lib/appalchemist/appimagetool"
-elif [ -f "$PROJECT_DIR/thirdparty/appimagetool-aarch64.AppImage" ]; then
+# Prefer the untouched download over the bundled copy.
+if [ -f "$PROJECT_DIR/thirdparty/appimagetool-aarch64.AppImage" ]; then
     APPIMAGETOOL="$PROJECT_DIR/thirdparty/appimagetool-aarch64.AppImage"
 else
     echo "ERROR: appimagetool for ARM64 not found!"
