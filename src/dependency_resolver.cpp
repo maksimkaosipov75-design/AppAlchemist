@@ -625,10 +625,30 @@ LibraryBundleReport DependencyResolver::bundleSystemLibraries(const QString& app
         while (libIt.hasNext()) {
             const QString candidate = libIt.next();
             const QString dir = QFileInfo(candidate).absolutePath();
-            // usr/lib is where this routine puts host libraries, module trees
-            // included; only entries outside those trees belong to the package.
-            if (dir == lib64Dir || dir.startsWith(lib64Dir + "/") ||
-                dir == lib32Dir || dir.startsWith(lib32Dir + "/")) {
+
+            // Skip what this routine and the module copier put there
+            // themselves: host libraries land directly in usr/lib, and host
+            // loadable-module trees in a handful of well known subdirectories.
+            // Everything else under usr/lib belongs to the package — private
+            // runtimes commonly live in usr/lib/<app>/lib, and excluding the
+            // whole subtree would hide exactly the libraries this index exists
+            // to find.
+            if (dir == lib64Dir || dir == lib32Dir) {
+                continue;
+            }
+            static const QStringList hostModuleTrees = {
+                "gio", "gtk-3.0", "gtk-4.0", "gdk-pixbuf-2.0",
+                "girepository-1.0", "qt6", "qt5"
+            };
+            bool insideHostModuleTree = false;
+            for (const QString& root : hostModuleTrees) {
+                if (dir.startsWith(lib64Dir + "/" + root + "/") || dir == lib64Dir + "/" + root ||
+                    dir.startsWith(lib32Dir + "/" + root + "/") || dir == lib32Dir + "/" + root) {
+                    insideHostModuleTree = true;
+                    break;
+                }
+            }
+            if (insideHostModuleTree) {
                 continue;
             }
             const QString name = QFileInfo(candidate).fileName();

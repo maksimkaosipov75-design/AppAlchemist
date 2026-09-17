@@ -1,3 +1,11 @@
+appalchemist (1.6.1-1) unstable; urgency=medium
+
+  * Point AppRun at the application binary of Electron packages instead of
+    their command line wrapper.
+  * Recognise private runtimes kept under usr/lib/<app> again.
+
+ -- AppAlchemist Team <appalchemist@example.com>  Thu, 18 Sep 2026 00:00:00 +0000
+
 appalchemist (1.6.0-1) unstable; urgency=medium
 
   * Converted AppImages no longer ship broken or shadowed libraries.

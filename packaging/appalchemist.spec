@@ -1,5 +1,5 @@
 Name:           appalchemist
-Version:        1.6.0
+Version:        1.6.1
 Release:        1%{?dist}
 Summary:        Convert Linux packages and archives to AppImage format
 License:        MIT
@@ -78,6 +78,9 @@ fi
 %{_datadir}/icons/hicolor/*/apps/appalchemist.png
 
 %changelog
+* Thu Sep 18 2026 AppAlchemist Team <appalchemist@example.com> - 1.6.1-1
+- Point AppRun at the application binary of Electron packages
+- Recognise private runtimes kept under usr/lib/<app>
 * Wed Sep 17 2026 AppAlchemist Team <appalchemist@example.com> - 1.6.0-1
 - Converted AppImages no longer ship broken or shadowed libraries
 - Harden archive extraction, subprocess execution and dependency resolution

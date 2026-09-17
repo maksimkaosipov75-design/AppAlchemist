@@ -1999,16 +1999,17 @@ bool AppDirBuilder::createAppRun(const QString& appDirPath, const PackageMetadat
                     }
                     
                     if (!usedAsar) {
+                        // Run the Electron binary itself. In VS Code style
+                        // layouts the bin/ launcher next to it is the command
+                        // line interface, not the application: it re-executes
+                        // Electron as node with cli.js and exits, which leaves
+                        // the desktop entry looking like it did nothing. The
+                        // package's own desktop file points here too.
+                        out << "# Running Electron binary directly (no .asar)\n";
                         if (!binLauncherPath.isEmpty()) {
-                            // Use bin launcher for VS Code/Codium style apps
-                            out << "# Using bin launcher: " << binLauncherPath << "\n";
-                            out << "exec \"${HERE}/" << binLauncherPath << "\" \"$@\"\n";
-                        } else {
-                            // No .asar file and no bin launcher - run Electron binary directly
-                            // This is common for Discord, Slack, etc.
-                            out << "# Running Electron binary directly (no .asar)\n";
-                            out << "exec \"${HERE}/" << electronBinaryPath << "\" \"$@\"\n";
+                            out << "# (" << binLauncherPath << " is the CLI entry point, not the GUI one)\n";
                         }
+                        out << "exec \"${HERE}/" << electronBinaryPath << "\" \"$@\"\n";
                     }
                 } else if (!binLauncherPath.isEmpty()) {
                     // Electron binary not found but bin launcher exists (VS Code/Codium)

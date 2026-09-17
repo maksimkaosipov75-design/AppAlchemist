@@ -59,14 +59,14 @@ Releases carry a build per architecture: `x86_64` for a normal PC and
 `aarch64` for ARM hardware.
 
 ```bash
-chmod +x appalchemist-1.6.0-x86_64.AppImage
-./appalchemist-1.6.0-x86_64.AppImage
+chmod +x appalchemist-1.6.1-x86_64.AppImage
+./appalchemist-1.6.1-x86_64.AppImage
 ```
 
 If FUSE is unavailable on your system:
 
 ```bash
-APPIMAGE_EXTRACT_AND_RUN=1 ./appalchemist-1.6.0-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./appalchemist-1.6.1-x86_64.AppImage
 ```
 
 ## GUI Usage

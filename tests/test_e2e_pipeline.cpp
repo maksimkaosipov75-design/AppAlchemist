@@ -113,6 +113,42 @@ TEST_CASE("AppRun exposes Qt plugin and QML paths shipped inside the package",
     }
 }
 
+TEST_CASE("Private libraries under usr/lib are treated as the package's own",
+          "[deps][bundling][private-libs]") {
+    // Packages frequently keep their private runtime in usr/lib/<app>/lib
+    // rather than under opt/. Those directories must be recognised as belonging
+    // to the package: the binary reaches them through an $ORIGIN-relative
+    // RPATH that no longer resolves once it is staged into usr/bin.
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+    const QString appDirPath = tempDir.path();
+
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/bin"));
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/lib"));
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/lib/sample-app/lib"));
+    // A host module tree, which must NOT be mistaken for a package library.
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/lib/gio/modules"));
+
+    REQUIRE(TestHelpers::createSampleElf(appDirPath + "/usr/bin/sample-app"));
+    REQUIRE(TestHelpers::createSampleElf(appDirPath + "/usr/lib/sample-app/lib/libprivate.so"));
+    REQUIRE(TestHelpers::createSampleElf(appDirPath + "/usr/lib/gio/modules/libgiomodule.so"));
+    // A host copy staged into usr/lib that shadows the package's own library.
+    REQUIRE(TestHelpers::createSampleElf(appDirPath + "/usr/lib/libprivate.so"));
+
+    DependencyResolver resolver;
+    const LibraryBundleReport report = resolver.bundleSystemLibraries(appDirPath);
+    REQUIRE(report.ran);
+
+    SECTION("the package's own copy wins over the staged host copy") {
+        REQUIRE(QFileInfo::exists(appDirPath + "/usr/lib/sample-app/lib/libprivate.so"));
+        REQUIRE_FALSE(QFileInfo::exists(appDirPath + "/usr/lib/libprivate.so"));
+    }
+
+    SECTION("host module trees are left alone") {
+        REQUIRE(QFileInfo::exists(appDirPath + "/usr/lib/gio/modules/libgiomodule.so"));
+    }
+}
+
 TEST_CASE("Library bundling prefers package-provided libraries over host copies",
           "[deps][bundling]") {
     QTemporaryDir tempDir;
@@ -282,4 +318,91 @@ TEST_CASE("Workload: Complete synthetic package to AppDir synthesis", "[e2e][wor
     // Executable exists in usr/bin
     QString binPath = appDirPath + "/usr/bin/full-app";
     REQUIRE(QFile::exists(binPath));
+}
+
+TEST_CASE("Electron AppRun targets the application, not its CLI wrapper",
+          "[appdir][apprun][electron]") {
+    // Electron applications install <dir>/<binary> next to their runtime and,
+    // in the VS Code family, a <dir>/bin/<name> shell script that re-executes
+    // Electron as node to run cli.js. Pointing AppRun at that wrapper makes the
+    // desktop entry look like it does nothing.
+    //
+    // Nothing here is tied to a particular product: the binary is found by
+    // looking at what the directory contains, so forks and rebrands work
+    // without being listed anywhere.
+    auto buildElectronAppDir = [](const QString& appDirPath,
+                                  const QString& dirName,
+                                  const QString& binaryName) {
+        const QString baseDir = appDirPath + "/usr/share/" + dirName;
+        REQUIRE(QDir().mkpath(appDirPath + "/usr/bin"));
+        REQUIRE(QDir().mkpath(baseDir + "/bin"));
+        REQUIRE(QDir().mkpath(baseDir + "/resources/app"));
+
+        // Runtime artifacts that identify an Electron application.
+        QFile snapshot(baseDir + "/v8_context_snapshot.bin");
+        REQUIRE(snapshot.open(QIODevice::WriteOnly));
+        snapshot.write(QByteArray(64, 'v'));
+        snapshot.close();
+
+        // The application binary, deliberately larger than the helpers.
+        REQUIRE(TestHelpers::createSampleElf(baseDir + "/" + binaryName));
+        QFile app(baseDir + "/" + binaryName);
+        REQUIRE(app.open(QIODevice::Append));
+        app.write(QByteArray(4096, 'x'));
+        app.close();
+
+        // Chromium helpers that must never be mistaken for the application.
+        REQUIRE(TestHelpers::createSampleElf(baseDir + "/chrome-sandbox"));
+        REQUIRE(TestHelpers::createSampleElf(baseDir + "/chrome_crashpad_handler"));
+        REQUIRE(TestHelpers::createSampleElf(baseDir + "/libffmpeg.so"));
+
+        // The command line wrapper.
+        const QString cliWrapper = baseDir + "/bin/" + dirName;
+        QFile wrapper(cliWrapper);
+        REQUIRE(wrapper.open(QIODevice::WriteOnly | QIODevice::Text));
+        wrapper.write("#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec ../" + binaryName.toUtf8() + " cli.js \"$@\"\n");
+        wrapper.close();
+        REQUIRE(SubprocessWrapper::setExecutable(cliWrapper));
+
+        REQUIRE(TestHelpers::createSampleElf(appDirPath + "/usr/bin/" + dirName));
+    };
+
+    auto generatedAppRun = [](const QString& appDirPath, const QString& dirName) {
+        PackageMetadata meta;
+        meta.package = dirName;
+        meta.mainExecutable = "usr/bin/" + dirName;
+        meta.executables = {"usr/bin/" + dirName};
+
+        AppDirBuilder builder;
+        REQUIRE(builder.createAppRun(appDirPath, meta));
+
+        QFile appRun(appDirPath + "/AppRun");
+        REQUIRE(appRun.open(QIODevice::ReadOnly | QIODevice::Text));
+        const QString content = appRun.readAll();
+        appRun.close();
+        return content;
+    };
+
+    SECTION("binary named after its directory") {
+        QTemporaryDir tempDir;
+        REQUIRE(tempDir.isValid());
+        buildElectronAppDir(tempDir.path(), "editorfork", "editorfork");
+
+        const QString content = generatedAppRun(tempDir.path(), "editorfork");
+        INFO("Generated AppRun:\n" << content.toStdString());
+        REQUIRE(content.contains("usr/share/editorfork/editorfork"));
+        REQUIRE_FALSE(content.contains("/bin/editorfork\""));
+    }
+
+    SECTION("binary named differently from its directory") {
+        QTemporaryDir tempDir;
+        REQUIRE(tempDir.isValid());
+        buildElectronAppDir(tempDir.path(), "chatclient", "ChatClientBinary");
+
+        const QString content = generatedAppRun(tempDir.path(), "chatclient");
+        INFO("Generated AppRun:\n" << content.toStdString());
+        REQUIRE(content.contains("usr/share/chatclient/ChatClientBinary"));
+        REQUIRE_FALSE(content.contains("chrome-sandbox"));
+        REQUIRE_FALSE(content.contains("/bin/chatclient\""));
+    }
 }

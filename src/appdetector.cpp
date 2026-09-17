@@ -1,6 +1,8 @@
 #include "appdetector.h"
 #include "utils.h"
 #include <QFileInfo>
+#include <QFile>
+#include <QSet>
 #include <QDirIterator>
 #include <QRegularExpression>
 #include <QDebug>
@@ -494,6 +496,26 @@ bool AppDetector::hasElectronIndicators(const QString& dirPath) {
     return false;
 }
 
+namespace {
+
+// An Electron application binary is a real executable. Shell wrappers that sit
+// next to it (VS Code style bin/<name> launchers) start the command line
+// interface instead of the application, so they must not be mistaken for it.
+bool isElfExecutable(const QString& path) {
+    const QFileInfo info(path);
+    if (!info.exists() || !info.isFile() || !info.isExecutable()) {
+        return false;
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    const QByteArray magic = file.read(4);
+    return magic.size() == 4 && magic.startsWith(QByteArrayLiteral("\x7f" "ELF"));
+}
+
+} // namespace
+
 QString AppDetector::findElectronBinary(const QString& fullBaseDirPath) {
     // Safety check: if path is empty or contains dangerous patterns
     if (fullBaseDirPath.isEmpty() || fullBaseDirPath.contains("..")) {
@@ -506,24 +528,33 @@ QString AppDetector::findElectronBinary(const QString& fullBaseDirPath) {
         return QString();
     }
     
-    // Common Electron binary names - include app-specific names
-    QStringList possibleNames = {
-        "electron", 
-        "Discord", "discord",  // Discord
-        "code", "codium",      // VS Code
-        "Slack", "slack",      // Slack
-        "teams", "Teams",      // Teams
-        "spotify", "Spotify",  // Spotify
-        "signal-desktop"       // Signal
-    };
+    // Packages install the application into a directory named after it and put
+    // the Electron binary inside under the same name, so derive the first
+    // candidate from the directory instead of relying on the list below. This
+    // is what makes forks work without being enumerated here.
+    QStringList possibleNames;
+    const QString baseDirName = QFileInfo(fullBaseDirPath).fileName();
+    if (!baseDirName.isEmpty()) {
+        possibleNames << baseDirName;
+    }
+
+    // Known names, for layouts where the binary is not named after its
+    // directory.
+    possibleNames << "electron"
+                  << "Discord" << "discord"   // Discord
+                  << "code" << "codium"       // VS Code
+                  << "Slack" << "slack"       // Slack
+                  << "teams" << "Teams"       // Teams
+                  << "spotify" << "Spotify"   // Spotify
+                  << "signal-desktop";        // Signal
+    possibleNames.removeDuplicates();
     
     // First check in electron/ subdirectory (common for packaged Electron apps)
     QString electronSubdir = QString("%1/electron").arg(fullBaseDirPath);
     if (QDir(electronSubdir).exists()) {
         for (const QString& name : possibleNames) {
             QString path = QString("%1/%2").arg(electronSubdir).arg(name);
-            QFileInfo info(path);
-            if (info.exists() && info.isExecutable()) {
+            if (isElfExecutable(path)) {
                 return QString("electron/%1").arg(name);
             }
         }
@@ -532,8 +563,7 @@ QString AppDetector::findElectronBinary(const QString& fullBaseDirPath) {
     // Then check directly in base directory
     for (const QString& name : possibleNames) {
         QString path = QString("%1/%2").arg(fullBaseDirPath).arg(name);
-        QFileInfo info(path);
-        if (info.exists() && info.isExecutable()) {
+        if (isElfExecutable(path)) {
             return name;
         }
     }
@@ -543,13 +573,47 @@ QString AppDetector::findElectronBinary(const QString& fullBaseDirPath) {
     if (QDir(binSubdir).exists()) {
         for (const QString& name : possibleNames) {
             QString path = QString("%1/%2").arg(binSubdir).arg(name);
-            QFileInfo info(path);
-            if (info.exists() && info.isExecutable()) {
+            if (isElfExecutable(path)) {
                 return QString("bin/%1").arg(name);
             }
         }
     }
-    
+
+    // Nothing matched by name. Rather than give up — which leaves the AppRun
+    // pointing at a launcher script or at nothing — look at what the directory
+    // actually contains: an Electron application ships exactly one large
+    // executable next to its runtime, plus a couple of well known helpers.
+    static const QSet<QString> chromiumHelpers = {
+        "chrome-sandbox",
+        "chrome_crashpad_handler",
+        "crashpad_handler"
+    };
+
+    QString bestCandidate;
+    qint64 bestSize = 0;
+    const QFileInfoList entries =
+        QDir(fullBaseDirPath).entryInfoList(QDir::Files | QDir::NoDotAndDotDot);
+    for (const QFileInfo& entry : entries) {
+        if (chromiumHelpers.contains(entry.fileName())) {
+            continue;
+        }
+        if (entry.suffix() == "so" || entry.completeSuffix().startsWith("so.")) {
+            continue;
+        }
+        if (!isElfExecutable(entry.absoluteFilePath())) {
+            continue;
+        }
+        if (entry.size() > bestSize) {
+            bestSize = entry.size();
+            bestCandidate = entry.fileName();
+        }
+    }
+
+    if (!bestCandidate.isEmpty()) {
+        qDebug() << "Electron binary identified by inspecting" << fullBaseDirPath << ":" << bestCandidate;
+        return bestCandidate;
+    }
+
     return QString();
 }
 
