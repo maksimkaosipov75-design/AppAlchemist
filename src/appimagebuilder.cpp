@@ -11,6 +11,7 @@
 #include <QNetworkRequest>
 #include <QNetworkReply>
 #include <QEventLoop>
+#include <QTimer>
 #include <QUrl>
 
 AppImageBuilder::AppImageBuilder(QObject* parent)
@@ -199,6 +200,12 @@ bool AppImageBuilder::checkAppImageTool(const QString& path) {
     return result.success;
 }
 
+namespace {
+// Budgets for fetching appimagetool: a stalled connection and an overall cap.
+constexpr int kAppImageToolTransferTimeoutMs = 15000;
+constexpr int kAppImageToolDownloadTimeoutMs = 120000;
+} // namespace
+
 bool AppImageBuilder::downloadAppImageTool() {
     QString cachedPath = getCachedAppImageToolPath();
     QFileInfo cachedInfo(cachedPath);
@@ -208,6 +215,15 @@ bool AppImageBuilder::downloadAppImageTool() {
         return true;
     }
     
+    // The download is driven by a nested event loop, which only works when a
+    // Qt application object exists. Without one the reply is never delivered
+    // and the loop blocks forever, hanging the caller (and any test harness)
+    // instead of reporting a missing tool.
+    if (!QCoreApplication::instance()) {
+        qWarning() << "Cannot download appimagetool: no Qt event loop in this context.";
+        return false;
+    }
+
     qDebug() << "Downloading appimagetool from GitHub...";
     
     // Download appimagetool from GitHub releases
@@ -224,13 +240,24 @@ bool AppImageBuilder::downloadAppImageTool() {
     QUrl url(downloadUrl);
     QNetworkRequest request(url);
     request.setRawHeader("User-Agent", "AppAlchemist/1.0.0");
+    // Abort a stalled transfer instead of waiting indefinitely.
+    request.setTransferTimeout(kAppImageToolTransferTimeoutMs);
     
     QEventLoop loop;
     QNetworkReply *reply = manager.get(request);
-    
+
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+
+    QTimer watchdog;
+    watchdog.setSingleShot(true);
+    QObject::connect(&watchdog, &QTimer::timeout, reply, [reply]() {
+        qWarning() << "appimagetool download exceeded its time budget, aborting.";
+        reply->abort();
+    });
+    watchdog.start(kAppImageToolDownloadTimeoutMs);
+
     loop.exec();
-    
+
     if (reply->error() != QNetworkReply::NoError) {
         qWarning() << "Failed to download appimagetool:" << reply->errorString();
         reply->deleteLater();
@@ -243,23 +270,44 @@ bool AppImageBuilder::downloadAppImageTool() {
         cacheDir.mkpath(".");
     }
     
-    QFile file(cachedPath);
-    if (!file.open(QIODevice::WriteOnly)) {
-        qWarning() << "Failed to open cache file for writing:" << cachedPath;
+    // Write to a staging file first: a truncated or bogus download must never
+    // end up in the cache under the name of a working tool.
+    const QString stagingPath = cachedPath + ".download";
+    QFile file(stagingPath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        qWarning() << "Failed to open cache file for writing:" << stagingPath;
         reply->deleteLater();
         return false;
     }
-    
-    file.write(reply->readAll());
-    file.close();
-    
-    // Make executable
-    QFile::setPermissions(cachedPath, QFile::ExeUser | QFile::ExeGroup | QFile::ExeOther | QFile::ReadUser | QFile::ReadGroup | QFile::ReadOther);
-    
+
+    const QByteArray payload = reply->readAll();
     reply->deleteLater();
-    
+
+    const bool written = file.write(payload) == payload.size();
+    file.close();
+    if (!written) {
+        qWarning() << "Failed to write downloaded appimagetool to:" << stagingPath;
+        QFile::remove(stagingPath);
+        return false;
+    }
+
+    QFile::setPermissions(stagingPath, QFile::ExeUser | QFile::ExeGroup | QFile::ExeOther | QFile::ReadUser | QFile::ReadGroup | QFile::ReadOther);
+
+    if (!checkAppImageTool(stagingPath)) {
+        qWarning() << "Downloaded appimagetool did not pass validation, discarding.";
+        QFile::remove(stagingPath);
+        return false;
+    }
+
+    QFile::remove(cachedPath);
+    if (!QFile::rename(stagingPath, cachedPath)) {
+        qWarning() << "Failed to install downloaded appimagetool at:" << cachedPath;
+        QFile::remove(stagingPath);
+        return false;
+    }
+
     qDebug() << "Successfully downloaded appimagetool to:" << cachedPath;
-    return checkAppImageTool(cachedPath);
+    return true;
 }
 
 bool AppImageBuilder::buildAppImage(const QString& appDirPath, const QString& outputPath, bool compress) {

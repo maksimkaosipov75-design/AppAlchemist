@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include "appimagebuilder.h"
 #include "compatibility_rules.h"
 #include <QFile>
 
@@ -1543,6 +1544,7 @@ TEST_CASE("ConversionController pipeline lifetime and leak prevention (MEM-MED-2
 }
 
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QTimer>
 #include <thread>
@@ -1937,5 +1939,27 @@ TEST_CASE("Package names handed to package managers are option-safe (SEC-HIGH-11
         REQUIRE_FALSE(SubprocessWrapper::isSafePackageName(""));
         REQUIRE_FALSE(SubprocessWrapper::isSafePackageName("   "));
         REQUIRE_FALSE(SubprocessWrapper::isSafePackageName(QString("a").repeated(256)));
+    }
+}
+
+TEST_CASE("appimagetool download never blocks the caller", "[appimagetool][network][timeout]") {
+    // CI showed the real failure mode: on a machine without the tool the
+    // download ran a nested event loop in a context that could not deliver the
+    // reply, so the conversion hung until it was killed 25 minutes later.
+    // Whatever the environment, the call must return promptly.
+    QElapsedTimer elapsed;
+    elapsed.start();
+    const bool downloaded = AppImageBuilder::downloadAppImageTool();
+    const qint64 spentMs = elapsed.elapsed();
+
+    INFO("downloadAppImageTool() returned " << downloaded << " after " << spentMs << " ms");
+    REQUIRE(spentMs < 150000);
+
+    if (downloaded) {
+        // A successful download must leave a usable tool behind, never a
+        // half-written file.
+        const QString tool = AppImageBuilder::findAppImageTool();
+        REQUIRE_FALSE(tool.isEmpty());
+        REQUIRE(QFileInfo(tool).isExecutable());
     }
 }
