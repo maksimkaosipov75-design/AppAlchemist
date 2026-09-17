@@ -32,7 +32,9 @@ rm -rf "$BUILD_DIR/appalchemist.AppDir" "$OUTPUT_DIR"
 # Build the application
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
-cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+# Packaging builds ship binaries, not tests: skipping them keeps the build
+# free of the Catch2 download and of any need for git in the image.
+cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DENABLE_TESTS=OFF
 make -j$(nproc)
 make install DESTDIR="$BUILD_DIR/appalchemist.AppDir"
 
