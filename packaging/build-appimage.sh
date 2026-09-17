@@ -9,6 +9,14 @@ OUTPUT_DIR="$PROJECT_DIR/releases"
 
 cd "$PROJECT_DIR"
 
+# AppImages mount themselves through FUSE, which is unavailable inside build
+# containers. Extraction mode is the supported fallback, so use it whenever
+# /dev/fuse is missing.
+if [ ! -e /dev/fuse ]; then
+    export APPIMAGE_EXTRACT_AND_RUN=1
+    echo "No /dev/fuse: running AppImage tools in extract-and-run mode"
+fi
+
 # Detect architecture
 ARCH=$(uname -m)
 case "$ARCH" in

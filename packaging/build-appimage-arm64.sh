@@ -1,4 +1,5 @@
 #!/bin/bash
+
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,6 +9,44 @@ PACKAGE_DIR="$PROJECT_DIR/packaging"
 OUTPUT_DIR="$PROJECT_DIR/releases"
 
 cd "$PROJECT_DIR"
+
+# AppImages mount themselves through FUSE, which is unavailable inside build
+# containers. Extraction mode is the supported fallback and costs only a little
+# disk space, so use it whenever /dev/fuse is missing.
+if [ ! -e /dev/fuse ]; then
+    export APPIMAGE_EXTRACT_AND_RUN=1
+    echo "No /dev/fuse: running AppImage tools in extract-and-run mode"
+fi
+
+# Download a helper tool and make sure what arrived is actually a binary.
+# A failed download leaves an empty file behind, which later fails with the
+# thoroughly unhelpful "cannot execute binary file: Exec format error".
+fetch_tool() {
+    url="$1"
+    dest="$2"
+
+    if [ -s "$dest" ] && head -c 4 "$dest" | grep -q "ELF"; then
+        echo "Using existing $(basename "$dest")"
+        chmod +x "$dest"
+        return 0
+    fi
+
+    echo "Downloading $(basename "$dest")..."
+    if ! wget -q --tries=3 --timeout=60 "$url" -O "$dest"; then
+        echo "ERROR: failed to download $url"
+        rm -f "$dest"
+        exit 1
+    fi
+
+    if [ ! -s "$dest" ] || ! head -c 4 "$dest" | grep -q "ELF"; then
+        echo "ERROR: $url did not return an executable ($(wc -c < "$dest") bytes)"
+        head -c 200 "$dest" || true
+        rm -f "$dest"
+        exit 1
+    fi
+
+    chmod +x "$dest"
+}
 
 # Force ARM64 architecture
 ARCH_NAME="aarch64"
@@ -42,14 +81,9 @@ if [ ! -x "$APPDIR/usr/bin/appalchemist-gui" ]; then
 fi
 
 # Download appimagetool for ARM64 if not available
-if [ ! -f "$PROJECT_DIR/thirdparty/appimagetool-aarch64.AppImage" ]; then
-    echo "Downloading appimagetool for ARM64..."
-    mkdir -p "$PROJECT_DIR/thirdparty"
-    cd "$PROJECT_DIR/thirdparty"
-    wget -q --show-progress "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-aarch64.AppImage" -O appimagetool-aarch64.AppImage
-    chmod +x appimagetool-aarch64.AppImage
-    cd "$PROJECT_DIR"
-fi
+mkdir -p "$PROJECT_DIR/thirdparty"
+fetch_tool "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-aarch64.AppImage" \
+    "$PROJECT_DIR/thirdparty/appimagetool-aarch64.AppImage"
 
 # Copy appimagetool for ARM64
 if [ -f "$PROJECT_DIR/thirdparty/appimagetool-aarch64.AppImage" ]; then
@@ -89,23 +123,10 @@ LINUXDEPLOY_PLUGIN_QT=""
 LINUXDEPLOY_FILE="linuxdeploy-aarch64.AppImage"
 LINUXDEPLOY_PLUGIN_QT_FILE="linuxdeploy-plugin-qt-aarch64.AppImage"
 
-# Download linuxdeploy if not present
-if [ ! -f "$THIRDPARTY_DIR/$LINUXDEPLOY_FILE" ]; then
-    echo "Downloading linuxdeploy for ARM64..."
-    cd "$THIRDPARTY_DIR"
-    wget -q --show-progress "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/$LINUXDEPLOY_FILE" -O "$LINUXDEPLOY_FILE"
-    chmod +x "$LINUXDEPLOY_FILE"
-    cd "$PROJECT_DIR"
-fi
-
-# Download Qt plugin if not present
-if [ ! -f "$THIRDPARTY_DIR/$LINUXDEPLOY_PLUGIN_QT_FILE" ]; then
-    echo "Downloading linuxdeploy Qt plugin for ARM64..."
-    cd "$THIRDPARTY_DIR"
-    wget -q --show-progress "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/$LINUXDEPLOY_PLUGIN_QT_FILE" -O "$LINUXDEPLOY_PLUGIN_QT_FILE"
-    chmod +x "$LINUXDEPLOY_PLUGIN_QT_FILE"
-    cd "$PROJECT_DIR"
-fi
+fetch_tool "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/$LINUXDEPLOY_FILE" \
+    "$THIRDPARTY_DIR/$LINUXDEPLOY_FILE"
+fetch_tool "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/$LINUXDEPLOY_PLUGIN_QT_FILE" \
+    "$THIRDPARTY_DIR/$LINUXDEPLOY_PLUGIN_QT_FILE"
 
 LINUXDEPLOY="$THIRDPARTY_DIR/$LINUXDEPLOY_FILE"
 LINUXDEPLOY_PLUGIN_QT="$THIRDPARTY_DIR/$LINUXDEPLOY_PLUGIN_QT_FILE"
@@ -281,6 +302,18 @@ echo "Using appimagetool: $APPIMAGETOOL"
 ARCH=aarch64 "$APPIMAGETOOL" -n "$APPDIR" "$OUTPUT_DIR/AppAlchemist-ARM64.AppImage"
 
 chmod +x "$OUTPUT_DIR/AppAlchemist-ARM64.AppImage"
+
+# The packaging tools are chatty and forgiving; make sure something usable came
+# out of them before declaring success.
+if [ ! -s "$OUTPUT_DIR/AppAlchemist-ARM64.AppImage" ]; then
+    echo "ERROR: appimagetool produced no output"
+    exit 1
+fi
+if ! head -c 4 "$OUTPUT_DIR/AppAlchemist-ARM64.AppImage" | grep -q "ELF"; then
+    echo "ERROR: the produced file is not an executable image"
+    exit 1
+fi
+file "$OUTPUT_DIR/AppAlchemist-ARM64.AppImage" || true
 
 echo ""
 echo "=== AppImage Built Successfully ==="
