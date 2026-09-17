@@ -55,6 +55,9 @@ The goal is practical portability, not magic. Some packages still need manual re
 5. Choose an output directory.
 6. Convert and run the generated AppImage.
 
+Releases carry a build per architecture: `x86_64` for a normal PC and
+`aarch64` for ARM hardware.
+
 ```bash
 chmod +x appalchemist-1.6.0-x86_64.AppImage
 ./appalchemist-1.6.0-x86_64.AppImage
