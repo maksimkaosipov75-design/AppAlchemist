@@ -61,7 +61,11 @@ echo "Note: This script should be run on an ARM64 system (e.g., Asahi Linux on M
 echo "For cross-compilation from x86_64, you need Qt6 cross-compilation toolchain"
 
 # Clean previous builds
-rm -rf "$BUILD_DIR/appalchemist.AppDir" "$OUTPUT_DIR/AppAlchemist-ARM64.AppImage"
+# Name the artifact like the x86_64 one: appalchemist-<version>-aarch64.AppImage
+VERSION=$(grep -E "^project\(appalchemist VERSION" "$PROJECT_DIR/CMakeLists.txt" | sed -E 's/.*VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/' || echo "1.6.0")
+APPIMAGE_NAME="appalchemist-${VERSION}-aarch64.AppImage"
+
+rm -rf "$BUILD_DIR/appalchemist.AppDir" "$OUTPUT_DIR/$APPIMAGE_NAME"
 
 # Build the application
 mkdir -p "$BUILD_DIR"
@@ -317,24 +321,24 @@ else
 fi
 
 echo "Using appimagetool: $APPIMAGETOOL"
-ARCH=aarch64 "$APPIMAGETOOL" -n "$APPDIR" "$OUTPUT_DIR/AppAlchemist-ARM64.AppImage"
+ARCH=aarch64 "$APPIMAGETOOL" -n "$APPDIR" "$OUTPUT_DIR/$APPIMAGE_NAME"
 
-chmod +x "$OUTPUT_DIR/AppAlchemist-ARM64.AppImage"
+chmod +x "$OUTPUT_DIR/$APPIMAGE_NAME"
 
 # The packaging tools are chatty and forgiving; make sure something usable came
 # out of them before declaring success.
-if [ ! -s "$OUTPUT_DIR/AppAlchemist-ARM64.AppImage" ]; then
+if [ ! -s "$OUTPUT_DIR/$APPIMAGE_NAME" ]; then
     echo "ERROR: appimagetool produced no output"
     exit 1
 fi
-if ! head -c 4 "$OUTPUT_DIR/AppAlchemist-ARM64.AppImage" | grep -q "ELF"; then
+if ! head -c 4 "$OUTPUT_DIR/$APPIMAGE_NAME" | grep -q "ELF"; then
     echo "ERROR: the produced file is not an executable image"
     exit 1
 fi
-file "$OUTPUT_DIR/AppAlchemist-ARM64.AppImage" || true
+file "$OUTPUT_DIR/$APPIMAGE_NAME" || true
 
 echo ""
 echo "=== AppImage Built Successfully ==="
 echo "AppImage location: $OUTPUT_DIR/AppAlchemist-ARM64.AppImage"
-echo "File size: $(du -h "$OUTPUT_DIR/AppAlchemist-ARM64.AppImage" | cut -f1)"
+echo "File size: $(du -h "$OUTPUT_DIR/$APPIMAGE_NAME" | cut -f1)"
 

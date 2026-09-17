@@ -36,7 +36,7 @@ jobs:
 
       - name: Verify the AppImage runs
         run: |
-          APPIMAGE=releases/AppAlchemist-ARM64.AppImage
+          APPIMAGE=$(find releases -maxdepth 1 -name 'appalchemist-*-aarch64.AppImage' | head -1)
           test -s "$APPIMAGE"
           file "$APPIMAGE"
           # The bundle must at least start and answer on its CLI route.
@@ -46,13 +46,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: AppAlchemist-ARM64
-          path: releases/AppAlchemist-ARM64.AppImage
+          path: releases/appalchemist-*-aarch64.AppImage
           retention-days: 30
 
       - name: Upload to Release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v1
         with:
-          files: releases/AppAlchemist-ARM64.AppImage
+          files: releases/appalchemist-*-aarch64.AppImage
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
