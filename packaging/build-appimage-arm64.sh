@@ -46,6 +46,17 @@ fetch_tool() {
     fi
 
     chmod +x "$dest"
+
+    # Report what actually arrived: a tool built for the wrong architecture
+    # fails later with a bare "Exec format error" that explains nothing.
+    if command -v file >/dev/null 2>&1; then
+        echo "  $(file -b "$dest")"
+    fi
+    if ! "$dest" --version >/dev/null 2>&1; then
+        echo "  NOTE: $(basename "$dest") is not runnable in this environment"
+        echo "  host arch: $(uname -m), /dev/fuse: $([ -e /dev/fuse ] && echo yes || echo no)"
+        "$dest" --version 2>&1 | head -3 || true
+    fi
 }
 
 # Force ARM64 architecture
