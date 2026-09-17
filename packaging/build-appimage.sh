@@ -12,10 +12,9 @@ cd "$PROJECT_DIR"
 # AppImages mount themselves through FUSE, which is unavailable inside build
 # containers. Extraction mode is the supported fallback, so use it whenever
 # /dev/fuse is missing.
-if [ ! -e /dev/fuse ]; then
-    export APPIMAGE_EXTRACT_AND_RUN=1
-    echo "No /dev/fuse: running AppImage tools in extract-and-run mode"
-fi
+# Running an AppImage needs both /dev/fuse and libfuse2, and build machines
+# routinely lack one of them. Extraction mode always works.
+export APPIMAGE_EXTRACT_AND_RUN=1
 
 # Detect architecture
 ARCH=$(uname -m)
@@ -193,12 +192,18 @@ EOF
 chmod +x "$APPDIR/usr/bin/appalchemist-wrapper"
 
 # Copy icon if available
-if [ -f "$PROJECT_DIR/assets/icons/appalchemist.png" ]; then
-    cp "$PROJECT_DIR/assets/icons/appalchemist.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/appalchemist.png"
+# linuxdeploy only accepts icons in standard resolutions up to 512x512, so
+# prefer the pre-scaled copy the repository ships over the 1024x1024 master.
+ICON_SRC="$PROJECT_DIR/assets/icons/appalchemist-256.png"
+if [ ! -f "$ICON_SRC" ]; then
+    ICON_SRC="$PROJECT_DIR/assets/icons/appalchemist.png"
+fi
+if [ -f "$ICON_SRC" ]; then
+    cp "$ICON_SRC" "$APPDIR/usr/share/icons/hicolor/256x256/apps/appalchemist.png"
     # Keep a root icon with a linuxdeploy-compatible resolution.
     # Some sources ship a 1024x1024 icon, but linuxdeploy accepts up to 512x512.
     if command -v python3 >/dev/null 2>&1; then
-        python3 - "$PROJECT_DIR/assets/icons/appalchemist.png" "$APPDIR/appalchemist.png" <<'PY'
+        python3 - "$ICON_SRC" "$APPDIR/appalchemist.png" <<'PY'
 import shutil
 import sys
 
@@ -216,7 +221,7 @@ except Exception:
     shutil.copy2(src, dst)
 PY
     else
-        cp "$PROJECT_DIR/assets/icons/appalchemist.png" "$APPDIR/appalchemist.png"
+        cp "$ICON_SRC" "$APPDIR/appalchemist.png"
     fi
 fi
 

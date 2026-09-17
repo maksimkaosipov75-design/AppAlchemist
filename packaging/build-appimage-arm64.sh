@@ -13,10 +13,9 @@ cd "$PROJECT_DIR"
 # AppImages mount themselves through FUSE, which is unavailable inside build
 # containers. Extraction mode is the supported fallback and costs only a little
 # disk space, so use it whenever /dev/fuse is missing.
-if [ ! -e /dev/fuse ]; then
-    export APPIMAGE_EXTRACT_AND_RUN=1
-    echo "No /dev/fuse: running AppImage tools in extract-and-run mode"
-fi
+# Running an AppImage needs both /dev/fuse and libfuse2, and build machines
+# routinely lack one of them. Extraction mode always works.
+export APPIMAGE_EXTRACT_AND_RUN=1
 
 # Download a helper tool and make sure what arrived is actually a binary.
 # A failed download leaves an empty file behind, which later fails with the
@@ -51,11 +50,6 @@ fetch_tool() {
     # fails later with a bare "Exec format error" that explains nothing.
     if command -v file >/dev/null 2>&1; then
         echo "  $(file -b "$dest")"
-    fi
-    if ! "$dest" --version >/dev/null 2>&1; then
-        echo "  NOTE: $(basename "$dest") is not runnable in this environment"
-        echo "  host arch: $(uname -m), /dev/fuse: $([ -e /dev/fuse ] && echo yes || echo no)"
-        "$dest" --version 2>&1 | head -3 || true
     fi
 }
 
@@ -111,9 +105,15 @@ cp "$PACKAGE_DIR/appalchemist-deb-handler.desktop" "$APPDIR/usr/share/applicatio
 cp "$PACKAGE_DIR/appalchemist-rpm-handler.desktop" "$APPDIR/usr/share/applications/"
 
 # Copy icon if available
-if [ -f "$PROJECT_DIR/assets/icons/appalchemist.png" ]; then
-    cp "$PROJECT_DIR/assets/icons/appalchemist.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/appalchemist.png"
-    cp "$PROJECT_DIR/assets/icons/appalchemist.png" "$APPDIR/appalchemist.png"
+# linuxdeploy only accepts icons in standard resolutions up to 512x512, so
+# prefer the pre-scaled copy the repository ships over the 1024x1024 master.
+ICON_SRC="$PROJECT_DIR/assets/icons/appalchemist-256.png"
+if [ ! -f "$ICON_SRC" ]; then
+    ICON_SRC="$PROJECT_DIR/assets/icons/appalchemist.png"
+fi
+if [ -f "$ICON_SRC" ]; then
+    cp "$ICON_SRC" "$APPDIR/usr/share/icons/hicolor/256x256/apps/appalchemist.png"
+    cp "$ICON_SRC" "$APPDIR/appalchemist.png"
 fi
 
 # Copy MIME type files
@@ -160,8 +160,9 @@ if [ -f "$LINUXDEPLOY" ] && [ -f "$LINUXDEPLOY_PLUGIN_QT" ]; then
         --plugin qt 2>&1 | grep -v "ERROR: Strip call failed" || true
     
     # Check if Qt6 libraries were actually bundled (even if linuxdeploy reported errors)
+    # The frontend is GTK4; Qt backs only the core library, so these are the
+    # libraries that actually have to be present.
     if [ -f "$APPDIR/usr/lib/libQt6Core.so.6" ] && \
-       [ -f "$APPDIR/usr/lib/libQt6Widgets.so.6" ] && \
        [ -f "$APPDIR/usr/lib/libQt6Network.so.6" ]; then
         QT_BUNDLED=true
         echo "✓ Qt6 libraries successfully bundled"
@@ -178,7 +179,7 @@ if [ "$QT_BUNDLED" = false ]; then
     
     # Find Qt6 installation
     QT6_LIB_DIR=""
-    for dir in /usr/lib /usr/lib64; do
+    for dir in "/usr/lib/$(uname -m)-linux-gnu" /usr/lib /usr/lib64; do
         if [ -f "$dir/libQt6Core.so.6" ]; then
             QT6_LIB_DIR="$dir"
             break
@@ -190,7 +191,7 @@ if [ "$QT_BUNDLED" = false ]; then
         mkdir -p "$APPDIR/usr/lib"
         
         # Copy essential Qt6 libraries
-        for lib in libQt6Core.so.6 libQt6Widgets.so.6 libQt6Network.so.6 libQt6Gui.so.6 libQt6DBus.so.6; do
+        for lib in libQt6Core.so.6 libQt6Network.so.6 libQt6DBus.so.6; do
             if [ -f "$QT6_LIB_DIR/$lib" ]; then
                 cp "$QT6_LIB_DIR/$lib" "$APPDIR/usr/lib/" 2>/dev/null && echo "  Copied $lib" || true
             fi
