@@ -1,4 +1,4 @@
-FROM --platform=linux/arm64 ubuntu:22.04
+FROM --platform=linux/arm64 ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -10,6 +10,10 @@ RUN apt-get update && apt-get install -y \
     qt6-base-dev-tools \
     libgtk-4-dev \
     libadwaita-1-dev \
+    libarchive-dev \
+    libzstd-dev \
+    patchelf \
+    binutils \
     pkg-config \
     wget \
     file \

@@ -28,7 +28,7 @@ jobs:
           docker run --rm --platform linux/arm64 \
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
-            ubuntu:22.04 bash -c "
+            ubuntu:24.04 bash -c "
               apt-get update && \
               apt-get install -y build-essential cmake qt6-base-dev qt6-base-dev-tools libgtk-4-dev libadwaita-1-dev libarchive-dev libzstd-dev patchelf binutils pkg-config wget file && \
               chmod +x packaging/build-appimage-arm64.sh && \
