@@ -70,6 +70,17 @@ foreach(HARNESS ${APPALCHEMIST_STRESS_HARNESSES})
     set_tests_properties(${HARNESS} PROPERTIES TIMEOUT 600)
 endforeach()
 
+# Under sanitizers, keep LeakSanitizer focused on this project's own leaks.
+if(ENABLE_SANITIZERS)
+    set(APPALCHEMIST_TEST_ENVIRONMENT
+        "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/lsan.supp")
+    set_tests_properties(backend_tests PROPERTIES ENVIRONMENT "${APPALCHEMIST_TEST_ENVIRONMENT}")
+    foreach(HARNESS ${APPALCHEMIST_STRESS_HARNESSES})
+        set_tests_properties(${HARNESS} PROPERTIES ENVIRONMENT "${APPALCHEMIST_TEST_ENVIRONMENT}")
+    endforeach()
+endif()
+
 include(CTest)
 include(Catch)
-catch_discover_tests(appalchemist_tests)
+catch_discover_tests(appalchemist_tests
+    PROPERTIES ENVIRONMENT "${APPALCHEMIST_TEST_ENVIRONMENT}")

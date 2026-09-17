@@ -1,0 +1,9 @@
+# LeakSanitizer suppressions for allocations this project does not own.
+#
+# Qt Network asks the system for its proxy configuration on the first request
+# (QNetworkProxyFactory::systemProxyForQuery). On distributions that ship the
+# libproxy backend, that call leaks a handful of small glib allocations inside
+# libproxy itself. The leak is in third-party code, is bounded and happens once
+# per process, so it is suppressed here rather than hiding leaks of our own.
+leak:libpxbackend
+leak:libproxy
