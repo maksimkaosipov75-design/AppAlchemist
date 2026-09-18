@@ -604,3 +604,156 @@ TEST_CASE("A bundle without Guile says nothing about it", "[appdir][apprun][guil
 
     REQUIRE_FALSE(content.contains("GUILE_LOAD_PATH"));
 }
+
+TEST_CASE("A package's directory is its own even with the version appended",
+          "[appdir][relocation]") {
+    // abiword installs its plugins into usr/lib/<triplet>/abiword-3.0 and its
+    // data into usr/share/abiword-3.0. Matching the package name exactly left
+    // those paths pointing at the host, where they do not exist, and the
+    // program reported only "Unable to load AbiWord".
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+    const QString appDirPath = tempDir.path();
+
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/bin"));
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/share/sampleword-3.0/templates"));
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/lib/x86_64-linux-gnu/sampleword-3.0/plugins"));
+
+    const QString binary = appDirPath + "/usr/bin/sampleword";
+    REQUIRE(TestHelpers::createSampleElf(binary));
+    {
+        QFile file(binary);
+        REQUIRE(file.open(QIODevice::Append));
+        file.write("/usr/share/sampleword-3.0/templates/normal.awt");
+        file.write("\0", 1);
+        file.write("/usr/lib/x86_64-linux-gnu/sampleword-3.0/plugins");
+        file.write("\0", 1);
+        file.close();
+    }
+
+    PackageMetadata meta;
+    meta.package = "sampleword";
+    meta.mainExecutable = "usr/bin/sampleword";
+    meta.executables = {"usr/bin/sampleword"};
+
+    AppDirBuilder builder;
+    const QStringList relocated = builder.relocatePackagePaths(appDirPath, meta);
+
+    REQUIRE(relocated.contains("/usr/share/sampleword-3.0"));
+    REQUIRE(relocated.contains("/usr/lib/x86_64-linux-gnu/sampleword-3.0"));
+
+    QFile patched(binary);
+    REQUIRE(patched.open(QIODevice::ReadOnly));
+    const QByteArray content = patched.readAll();
+    patched.close();
+
+    SECTION("the versioned directory now resolves inside the bundle") {
+        REQUIRE(content.contains("././/share/sampleword-3.0/templates/normal.awt"));
+        REQUIRE(content.contains("././/lib/x86_64-linux-gnu/sampleword-3.0/plugins"));
+    }
+
+    SECTION("nothing was lengthened or shortened") {
+        QFile original(appDirPath + "/usr/bin/sampleword");
+        REQUIRE(original.open(QIODevice::ReadOnly));
+        REQUIRE(original.size() == content.size());
+        original.close();
+        REQUIRE_FALSE(content.contains("/usr/share/sampleword-3.0"));
+    }
+}
+
+TEST_CASE("A file the package ships is reached even in a shared directory",
+          "[appdir][relocation]") {
+    // abiword loads its own icon from /usr/share/icons/hicolor/.../abiword.png
+    // and aborts when it is missing. The icons directory is shared with the
+    // distribution and must stay reachable, but that one file belongs to the
+    // package, so the reference is pointed at the copy in the bundle.
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+    const QString appDirPath = tempDir.path();
+
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/bin"));
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/share/icons/hicolor/16x16/apps"));
+
+    QFile icon(appDirPath + "/usr/share/icons/hicolor/16x16/apps/sampleword.png");
+    REQUIRE(icon.open(QIODevice::WriteOnly));
+    icon.write("\x89PNG");
+    icon.close();
+
+    const QString binary = appDirPath + "/usr/bin/sampleword";
+    REQUIRE(TestHelpers::createSampleElf(binary));
+    {
+        QFile file(binary);
+        REQUIRE(file.open(QIODevice::Append));
+        file.write("/usr/share/icons/hicolor/16x16/apps/sampleword.png");
+        file.write("\0", 1);
+        // A directory shared with the distribution stays as it is: the host's
+        // icons and translations must remain reachable.
+        file.write("/usr/share/icons/hicolor");
+        file.write("\0", 1);
+        file.close();
+    }
+
+    PackageMetadata meta;
+    meta.package = "sampleword";
+    // The path recorded for an executable points into the directory the
+    // package was unpacked in, not into the bundle.
+    meta.mainExecutable = "/tmp/appalchemist-XXXXXX/extracted/data/usr/bin/sampleword";
+    meta.executables = {meta.mainExecutable};
+
+    AppDirBuilder builder;
+    builder.relocatePackagePaths(appDirPath, meta);
+
+    QFile patched(binary);
+    REQUIRE(patched.open(QIODevice::ReadOnly));
+    const QByteArray content = patched.readAll();
+    patched.close();
+
+    REQUIRE(content.contains("././/share/icons/hicolor/16x16/apps/sampleword.png"));
+    REQUIRE(content.contains(QByteArray("/usr/share/icons/hicolor\0", 25)));
+}
+
+TEST_CASE("The application's own library is read for its file references",
+          "[appdir][relocation]") {
+    // abiword loads its icon from libabiword-3.0.so, which a separate package
+    // ships. Reading only the program left that reference pointing at the
+    // host, and the application aborted on the missing file.
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+    const QString appDirPath = tempDir.path();
+
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/bin"));
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/lib/x86_64-linux-gnu"));
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/share/icons/hicolor/16x16/apps"));
+
+    QFile icon(appDirPath + "/usr/share/icons/hicolor/16x16/apps/sampleword.png");
+    REQUIRE(icon.open(QIODevice::WriteOnly));
+    icon.write("\x89PNG");
+    icon.close();
+
+    REQUIRE(TestHelpers::createSampleElf(appDirPath + "/usr/bin/sampleword"));
+
+    const QString library = appDirPath + "/usr/lib/x86_64-linux-gnu/libsampleword-3.0.so";
+    REQUIRE(TestHelpers::createSampleElf(library));
+    {
+        QFile file(library);
+        REQUIRE(file.open(QIODevice::Append));
+        file.write("/usr/share/icons/hicolor/16x16/apps/sampleword.png");
+        file.write("\0", 1);
+        file.close();
+    }
+
+    PackageMetadata meta;
+    meta.package = "sampleword";
+    meta.mainExecutable = "usr/bin/sampleword";
+    meta.executables = {"usr/bin/sampleword"};
+
+    AppDirBuilder builder;
+    builder.relocatePackagePaths(appDirPath, meta);
+
+    QFile patched(library);
+    REQUIRE(patched.open(QIODevice::ReadOnly));
+    const QByteArray content = patched.readAll();
+    patched.close();
+
+    REQUIRE(content.contains("././/share/icons/hicolor/16x16/apps/sampleword.png"));
+}

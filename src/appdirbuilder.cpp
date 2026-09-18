@@ -2780,19 +2780,37 @@ QStringList AppDirBuilder::relocatePackagePaths(const QString& appDirPath,
         if (!prefix.startsWith("usr/")) {
             continue;
         }
+        const QDir prefixDir(appDir.absoluteFilePath(prefix));
         for (const QString& name : names) {
-            const QString relative = QString("%1/%2").arg(prefix, name);
-            if (isSharedSystemDirectory(QFileInfo(relative).fileName())) {
-                continue;
+            // A package keeps its files under its own name, and just as often
+            // under its name with the version it was built for appended:
+            // abiword installs into abiword-3.0. Both are the package's own.
+            QStringList candidates = {name};
+            if (prefixDir.exists()) {
+                const QRegularExpression versioned(
+                    QString("^%1[-._]?[0-9][0-9A-Za-z.+-]*$").arg(QRegularExpression::escape(name)));
+                for (const QString& entry :
+                     prefixDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+                    if (versioned.match(entry).hasMatch() && !candidates.contains(entry)) {
+                        candidates << entry;
+                    }
+                }
             }
-            if (!QDir(appDir.absoluteFilePath(relative)).exists()) {
-                continue;
-            }
-            const QString absolute = "/" + relative;
-            const QByteArray encoded = absolute.toUtf8();
-            if (!ownedPaths.contains(encoded)) {
-                ownedPaths.append(encoded);
-                relocated << absolute;
+
+            for (const QString& candidate : candidates) {
+                const QString relative = QString("%1/%2").arg(prefix, candidate);
+                if (isSharedSystemDirectory(QFileInfo(relative).fileName())) {
+                    continue;
+                }
+                if (!QDir(appDir.absoluteFilePath(relative)).exists()) {
+                    continue;
+                }
+                const QString absolute = "/" + relative;
+                const QByteArray encoded = absolute.toUtf8();
+                if (!ownedPaths.contains(encoded)) {
+                    ownedPaths.append(encoded);
+                    relocated << absolute;
+                }
             }
         }
     }
@@ -2839,6 +2857,82 @@ QStringList AppDirBuilder::relocatePackagePaths(const QString& appDirPath,
                 }
                 if (!QFileInfo::exists(appDirPath + reference)) {
                     continue;
+                }
+                const QByteArray encoded = reference.toUtf8();
+                if (!ownedPaths.contains(encoded)) {
+                    ownedPaths.append(encoded);
+                    relocated << reference;
+                }
+            }
+        }
+    }
+
+    // A package also names single files by their absolute path, and some of
+    // those sit in directories shared with the distribution: abiword loads its
+    // own icon from /usr/share/icons/hicolor/.../abiword.png and aborts when
+    // it is not there. Excluding the shared directory is right - the host's
+    // icons must stay reachable - but a file the package ships is its own, so
+    // the reference is pointed at the copy in the bundle. Only the package's
+    // own programs are read this way; bundled host libraries keep pointing at
+    // the host, as they must.
+    {
+        QStringList ownExecutables = metadata.executables;
+        if (!metadata.mainExecutable.isEmpty()) {
+            ownExecutables << metadata.mainExecutable;
+        }
+
+        // The application's own code is not only its program: abiword loads
+        // the icon from libabiword-3.0.so, which a separate package ships. A
+        // library carrying the application's name belongs to it just as the
+        // program does, while everything else stays untouched.
+        for (const QString& name : names) {
+            for (const QString& root : {QStringLiteral("usr/lib"), QStringLiteral("usr/lib64")}) {
+                const QString fullRoot = appDir.absoluteFilePath(root);
+                if (!QDir(fullRoot).exists()) {
+                    continue;
+                }
+                QDirIterator libIt(fullRoot, {"lib" + name + "*.so*", name + "*.so*"},
+                                   QDir::Files | QDir::NoSymLinks, QDirIterator::Subdirectories);
+                while (libIt.hasNext()) {
+                    const QString library = libIt.next();
+                    if (!ownExecutables.contains(library)) {
+                        ownExecutables << library;
+                    }
+                }
+            }
+        }
+        static const QRegularExpression filePattern(
+            R"((/usr/(?:share|lib|lib64|libexec)/[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)+))");
+        for (const QString& executable : ownExecutables) {
+            // The path recorded for an executable points into the directory
+            // the package was unpacked in; what matters here is where it ended
+            // up in the bundle, which is the same path from "usr/" onwards.
+            QString relative = executable;
+            for (const QString& root : {QStringLiteral("/usr/"), QStringLiteral("/opt/")}) {
+                const int position = relative.lastIndexOf(root);
+                if (position >= 0) {
+                    relative = relative.mid(position + 1);
+                    break;
+                }
+            }
+            if (relative.startsWith('/')) {
+                relative = relative.mid(1);
+            }
+            const QString candidate = appDir.absoluteFilePath(relative);
+            QFile file(candidate);
+            if (!QFileInfo(candidate).isFile() || !file.open(QIODevice::ReadOnly)) {
+                continue;
+            }
+            const QByteArray content = file.readAll();
+            file.close();
+
+            QRegularExpressionMatchIterator matches =
+                filePattern.globalMatch(QString::fromLatin1(content));
+            while (matches.hasNext()) {
+                const QString reference = matches.next().captured(1);
+                const QFileInfo inBundle(appDirPath + reference);
+                if (!inBundle.isFile()) {
+                    continue;   // only a file the bundle actually carries
                 }
                 const QByteArray encoded = reference.toUtf8();
                 if (!ownedPaths.contains(encoded)) {
