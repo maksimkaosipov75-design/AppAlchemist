@@ -78,6 +78,12 @@ bool RpmRepository::fetch(const QString& url, const QString& destination, int ti
 
     const ProcessResult result = SubprocessWrapper::execute(tool, arguments, {}, timeoutMs);
     if (!result.success || QFileInfo(staging).size() <= 0) {
+        // Without the reason a failure here reads as "the repository is
+        // unreachable", which hides an expired release, a proxy or a full disk.
+        const QString reason = result.stderrOutput.trimmed().isEmpty()
+                                   ? QString("exit code %1").arg(result.exitCode)
+                                   : result.stderrOutput.trimmed().left(200);
+        emit log(QString("Could not download %1: %2").arg(QFileInfo(destination).fileName(), reason));
         QFile::remove(staging);
         return false;
     }
