@@ -1197,17 +1197,34 @@ QStringList DependencyResolver::packageNamesForSoname(const QString& soname) {
     // time. Guessing from the name reaches a library that the declared
     // dependencies only mention through several other packages.
     QStringList candidates;
-    static const QRegularExpression pattern(QStringLiteral("^(.+)\\.so\\.([0-9]+)"));
+    static const QRegularExpression pattern(
+        QStringLiteral("^(.+)\\.so\\.([0-9]+(?:\\.[0-9]+)*)$"));
     const QRegularExpressionMatch match = pattern.match(soname);
     if (!match.hasMatch()) {
         return candidates;
     }
 
     const QString stem = match.captured(1);
-    const QString version = match.captured(2);
+    // A version has as many parts as the library chose to keep in its soname,
+    // and the package name keeps the same ones: libfltk.so.1.3 is shipped by
+    // libfltk1.3, libpng16.so.16 by libpng16-16. Both the full version and its
+    // leading number are worth asking about.
+    QStringList versions = {match.captured(2)};
+    const QString leading = match.captured(2).section('.', 0, 0);
+    if (!versions.contains(leading)) {
+        versions << leading;
+    }
+    const QString version = versions.first();
     // Package names are lower case whatever the library is called, so
     // libKF5Archive.so.5 is shipped by libkf5archive5.
-    for (const QString& base : {stem + version, stem + "-" + version, stem}) {
+    QStringList bases;
+    for (const QString& each : versions) {
+        bases << stem + each << stem + "-" + each;
+    }
+    bases << stem;
+    Q_UNUSED(version);
+
+    for (const QString& base : bases) {
         for (const QString& cased : {base, base.toLower()}) {
             for (const QString& name : {cased, cased + "t64"}) {
                 if (!candidates.contains(name) && SubprocessWrapper::isSafePackageName(name)) {

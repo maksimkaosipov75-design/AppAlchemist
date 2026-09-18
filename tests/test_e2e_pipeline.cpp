@@ -763,3 +763,66 @@ TEST_CASE("The application's own library is read for its file references",
 
     REQUIRE(content.contains("././/share/icons/hicolor/16x16/apps/sampleword.png"));
 }
+
+TEST_CASE("A desktop file with a non-standard group is made valid",
+          "[appdir][desktop]") {
+    // The specification requires any group beyond the standard ones to start
+    // with "X-". smplayer ships "Mini Shortcut Group", and the packaging tool
+    // refused to build the AppImage at all rather than ignore it.
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+    const QString appDirPath = tempDir.path();
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/share/applications"));
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/bin"));
+    REQUIRE(TestHelpers::createSampleElf(appDirPath + "/usr/bin/sample-app"));
+
+    const QString desktopPath = appDirPath + "/usr/share/applications/sample-app.desktop";
+    QFile desktop(desktopPath);
+    REQUIRE(desktop.open(QIODevice::WriteOnly | QIODevice::Text));
+    desktop.write(
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=Sample\n"
+        "Exec=sample-app\n"
+        "Categories=AudioVideo;\n"
+        "Actions=play;\n"
+        "\n"
+        "[Desktop Action play]\n"
+        "Name=Play\n"
+        "Exec=sample-app --play\n"
+        "\n"
+        "[Mini Shortcut Group]\n"
+        "Name=Mini\n"
+        "\n"
+        "[X-Custom Group]\n"
+        "Name=Custom\n");
+    desktop.close();
+
+    PackageMetadata meta;
+    meta.package = "sample-app";
+    meta.mainExecutable = "usr/bin/sample-app";
+
+    AppDirBuilder builder;
+    REQUIRE(builder.fixDesktopFile(desktopPath, meta));
+
+    QFile updated(desktopPath);
+    REQUIRE(updated.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QString content = updated.readAll();
+    updated.close();
+
+    SECTION("the non-standard group is prefixed") {
+        REQUIRE(content.contains("[X-Mini Shortcut Group]"));
+        REQUIRE_FALSE(content.contains("[Mini Shortcut Group]"));
+    }
+
+    SECTION("the standard groups are left alone") {
+        REQUIRE(content.contains("[Desktop Entry]"));
+        REQUIRE(content.contains("[Desktop Action play]"));
+        REQUIRE_FALSE(content.contains("[X-Desktop Action play]"));
+    }
+
+    SECTION("a group already prefixed is not prefixed twice") {
+        REQUIRE(content.contains("[X-Custom Group]"));
+        REQUIRE_FALSE(content.contains("[X-X-Custom Group]"));
+    }
+}

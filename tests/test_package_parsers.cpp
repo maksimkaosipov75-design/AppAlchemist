@@ -842,6 +842,16 @@ TEST_CASE("A library names the package that ships it", "[deps][sonames]") {
         REQUIRE(candidates.contains("libkf5archive5"));
     }
 
+    SECTION("a version of several parts is kept whole") {
+        // dillo needs libfltk.so.1.3, which libfltk1.3t64 ships.
+        const QStringList candidates =
+            DependencyResolver::packageNamesForSoname("libfltk.so.1.3");
+        REQUIRE(candidates.contains("libfltk1.3"));
+        REQUIRE(candidates.contains("libfltk1.3t64"));
+        // The leading number alone is worth asking about as well.
+        REQUIRE(candidates.contains("libfltk1"));
+    }
+
     SECTION("a name that is not a library yields nothing") {
         REQUIRE(DependencyResolver::packageNamesForSoname("kcalc").isEmpty());
         REQUIRE(DependencyResolver::packageNamesForSoname("").isEmpty());

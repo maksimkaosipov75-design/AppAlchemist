@@ -1492,6 +1492,47 @@ bool AppDirBuilder::fixDesktopFile(const QString& desktopPath, const PackageMeta
         }
     }
     
+    // The specification reserves plain group names and requires anything else
+    // to start with "X-". A package may ship such a group anyway - smplayer
+    // declares "Mini Shortcut Group" - and the packaging tool then refuses to
+    // build the AppImage at all. Prefixing keeps what the group says while
+    // making the file valid.
+    {
+        static const QRegularExpression groupPattern(QStringLiteral("(?m)^\\[([^\\]]+)\\]"));
+        static const QStringList standardGroups = {
+            QStringLiteral("Desktop Entry"), QStringLiteral("Desktop Action")
+        };
+
+        QString rebuilt;
+        rebuilt.reserve(content.size() + 64);
+        int position = 0;
+        QRegularExpressionMatchIterator groups = groupPattern.globalMatch(content);
+        while (groups.hasNext()) {
+            const QRegularExpressionMatch group = groups.next();
+            const QString name = group.captured(1).trimmed();
+
+            bool standard = name.startsWith("X-") || standardGroups.contains(name);
+            for (const QString& prefix : standardGroups) {
+                if (name.startsWith(prefix + " ")) {
+                    standard = true;   // "Desktop Action <name>"
+                }
+            }
+            if (standard) {
+                continue;
+            }
+
+            rebuilt += content.mid(position, group.capturedStart(0) - position);
+            rebuilt += "[X-" + name + "]";
+            position = group.capturedEnd(0);
+            qDebug() << "Prefixed non-standard .desktop group:" << name;
+            modified = true;
+        }
+        if (position > 0) {
+            rebuilt += content.mid(position);
+            content = rebuilt;
+        }
+    }
+
     // Also ensure Type=Application is present
     if (!content.contains("Type=Application", Qt::CaseInsensitive) && 
         content.contains("[Desktop Entry]", Qt::CaseInsensitive)) {
