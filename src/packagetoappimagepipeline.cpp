@@ -704,6 +704,21 @@ void PackageToAppImagePipeline::bundleAppDirLibraries(const QString& stageLabel)
         // package that the declared dependencies only reach through another
         // one, so the list is expanded before anything is downloaded.
         QStringList toFetch = m_metadata.depends;
+
+        // A library the loader cannot find is named directly rather than
+        // waited for: the closure of declared dependencies reaches it only
+        // through several other packages, and kcalc lost libdbusmenu-qt5 that
+        // way. Which of the candidate names exists is left to the package
+        // manager - a name it does not know simply yields nothing.
+        for (const QString& missing : report.unresolved) {
+            for (const QString& candidate :
+                 DependencyResolver::packageNamesForSoname(missing)) {
+                if (!toFetch.contains(candidate)) {
+                    toFetch << candidate;
+                }
+            }
+        }
+
         const QStringList transitive =
             m_dependencyResolver->expandLibraryDependencies(m_metadata.depends);
         if (!transitive.isEmpty()) {

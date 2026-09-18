@@ -59,6 +59,11 @@ public:
     // across packages and those across further ones, so the library an
     // executable was built against is regularly two steps away from the
     // package that carries the executable.
+    // The packages a distribution is likely to ship the given library in,
+    // most specific first. Naming is a convention, so these are candidates:
+    // whether one exists is a question for the package manager.
+    static QStringList packageNamesForSoname(const QString& soname);
+
     // Removes every symlink under root that resolves to nothing, and answers
     // how many there were.
     static int removeDanglingSymlinks(const QString& root);

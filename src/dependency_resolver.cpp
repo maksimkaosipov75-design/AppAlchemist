@@ -1175,6 +1175,32 @@ int DependencyResolver::removeDanglingSymlinks(const QString& root) {
     return removed;
 }
 
+QStringList DependencyResolver::packageNamesForSoname(const QString& soname) {
+    // A distribution names a library package after the library it carries:
+    // libdbusmenu-qt5.so.2 is shipped by libdbusmenu-qt5-2, libpng16.so.16 by
+    // libpng16-16, libfoo.so.0 by libfoo0. The version may be joined directly
+    // or with a hyphen, and Debian appends t64 to packages rebuilt for 64-bit
+    // time. Guessing from the name reaches a library that the declared
+    // dependencies only mention through several other packages.
+    QStringList candidates;
+    static const QRegularExpression pattern(QStringLiteral("^(.+)\\.so\\.([0-9]+)"));
+    const QRegularExpressionMatch match = pattern.match(soname);
+    if (!match.hasMatch()) {
+        return candidates;
+    }
+
+    const QString stem = match.captured(1);
+    const QString version = match.captured(2);
+    for (const QString& base : {stem + version, stem + "-" + version, stem}) {
+        for (const QString& name : {base, base + "t64"}) {
+            if (!candidates.contains(name) && SubprocessWrapper::isSafePackageName(name)) {
+                candidates << name;
+            }
+        }
+    }
+    return candidates;
+}
+
 QStringList DependencyResolver::selectRuntimePackages(const QString& aptOutput,
                                                      const QStringList& already) {
     // Two kinds of package matter at runtime, and they are not equally

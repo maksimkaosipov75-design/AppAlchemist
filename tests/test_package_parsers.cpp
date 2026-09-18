@@ -810,3 +810,42 @@ TEST_CASE("A bundle ships no symlink that resolves to nothing", "[deps][symlinks
         REQUIRE(DependencyResolver::removeDanglingSymlinks(root) == 0);
     }
 }
+
+TEST_CASE("A library names the package that ships it", "[deps][sonames]") {
+    // kcalc needs libdbusmenu-qt5.so.2, which no package it declares mentions:
+    // the closure reaches it only through several others, and the library was
+    // left out of the bundle. A distribution names a library package after the
+    // library, so the name is derived rather than searched for.
+    SECTION("the version joins the name directly or with a hyphen") {
+        const QStringList candidates =
+            DependencyResolver::packageNamesForSoname("libdbusmenu-qt5.so.2");
+        REQUIRE(candidates.contains("libdbusmenu-qt5-2"));
+        REQUIRE(candidates.contains("libdbusmenu-qt52"));
+        REQUIRE(candidates.contains("libdbusmenu-qt5"));
+    }
+
+    SECTION("the usual shape is covered too") {
+        const QStringList candidates =
+            DependencyResolver::packageNamesForSoname("libpng16.so.16");
+        REQUIRE(candidates.contains("libpng1616"));
+        REQUIRE(candidates.contains("libpng16-16"));
+    }
+
+    SECTION("Debian's 64-bit time rebuilds are covered") {
+        const QStringList candidates = DependencyResolver::packageNamesForSoname("libglib-2.0.so.0");
+        REQUIRE(candidates.contains("libglib-2.0-0t64"));
+    }
+
+    SECTION("a name that is not a library yields nothing") {
+        REQUIRE(DependencyResolver::packageNamesForSoname("kcalc").isEmpty());
+        REQUIRE(DependencyResolver::packageNamesForSoname("").isEmpty());
+        REQUIRE(DependencyResolver::packageNamesForSoname("libfoo.so").isEmpty());
+    }
+
+    SECTION("nothing that could be read as an option is produced") {
+        const QStringList candidates = DependencyResolver::packageNamesForSoname("--evil.so.1");
+        for (const QString& candidate : candidates) {
+            REQUIRE_FALSE(candidate.startsWith('-'));
+        }
+    }
+}
