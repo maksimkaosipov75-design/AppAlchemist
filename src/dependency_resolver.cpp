@@ -1205,10 +1205,14 @@ QStringList DependencyResolver::packageNamesForSoname(const QString& soname) {
 
     const QString stem = match.captured(1);
     const QString version = match.captured(2);
+    // Package names are lower case whatever the library is called, so
+    // libKF5Archive.so.5 is shipped by libkf5archive5.
     for (const QString& base : {stem + version, stem + "-" + version, stem}) {
-        for (const QString& name : {base, base + "t64"}) {
-            if (!candidates.contains(name) && SubprocessWrapper::isSafePackageName(name)) {
-                candidates << name;
+        for (const QString& cased : {base, base.toLower()}) {
+            for (const QString& name : {cased, cased + "t64"}) {
+                if (!candidates.contains(name) && SubprocessWrapper::isSafePackageName(name)) {
+                    candidates << name;
+                }
             }
         }
     }

@@ -836,6 +836,12 @@ TEST_CASE("A library names the package that ships it", "[deps][sonames]") {
         REQUIRE(candidates.contains("libglib-2.0-0t64"));
     }
 
+    SECTION("package names are lower case whatever the library is called") {
+        const QStringList candidates =
+            DependencyResolver::packageNamesForSoname("libKF5Archive.so.5");
+        REQUIRE(candidates.contains("libkf5archive5"));
+    }
+
     SECTION("a name that is not a library yields nothing") {
         REQUIRE(DependencyResolver::packageNamesForSoname("kcalc").isEmpty());
         REQUIRE(DependencyResolver::packageNamesForSoname("").isEmpty());
