@@ -710,14 +710,17 @@ void PackageToAppImagePipeline::bundleAppDirLibraries(const QString& stageLabel)
         // through several other packages, and kcalc lost libdbusmenu-qt5 that
         // way. Which of the candidate names exists is left to the package
         // manager - a name it does not know simply yields nothing.
+        QStringList namedAfterMissing;
         for (const QString& missing : report.unresolved) {
             for (const QString& candidate :
                  DependencyResolver::packageNamesForSoname(missing)) {
                 if (!toFetch.contains(candidate)) {
                     toFetch << candidate;
+                    namedAfterMissing << candidate;
                 }
             }
         }
+        m_dependencyResolver->requirePackages(namedAfterMissing);
 
         const QStringList transitive =
             m_dependencyResolver->expandLibraryDependencies(m_metadata.depends);

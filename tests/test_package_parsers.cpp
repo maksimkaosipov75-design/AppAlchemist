@@ -849,3 +849,26 @@ TEST_CASE("A library names the package that ships it", "[deps][sonames]") {
         }
     }
 }
+
+TEST_CASE("A package asked for by name is fetched despite the exclusion list",
+          "[deps][sonames]") {
+    // The exclusion list matches on substrings, and "dbus" in it was enough to
+    // drop libdbusmenu-qt5-2 - the one package kcalc could not start without.
+    DependencyResolver resolver;
+    DependencySettings settings;
+    settings.enabled = true;
+    settings.excludeSystemLibs = true;
+    resolver.setSettings(settings);
+
+    resolver.requirePackages({"libdbusmenu-qt5-2"});
+
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    // Nothing is downloaded here: what matters is that the package is not
+    // reported as already present on the system.
+    const QList<ResolvedDependency> results =
+        resolver.resolveDependencies({"libdbusmenu-qt5-2"}, tempDir.path());
+    REQUIRE(results.size() == 1);
+    REQUIRE(results.first().resolvedPath != "(system)");
+}

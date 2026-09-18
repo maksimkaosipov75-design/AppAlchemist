@@ -1025,7 +1025,21 @@ void DependencyResolver::setSettings(const DependencySettings& settings) {
     initializeSonameExcludePatterns();
 }
 
+void DependencyResolver::requirePackages(const QStringList& names) {
+    for (const QString& name : names) {
+        m_requiredPackages.insert(name);
+    }
+}
+
 bool DependencyResolver::shouldExclude(const QString& name) {
+    // A package asked for because the loader could not find the library it
+    // carries is never excluded: the host demonstrably does not have it, so
+    // leaving it out is what breaks the bundle. The exclusion list matches on
+    // substrings, and "dbus" in it was enough to drop libdbusmenu-qt5-2.
+    if (m_requiredPackages.contains(name)) {
+        return false;
+    }
+
     if (!m_settings.excludeSystemLibs) {
         return false;
     }

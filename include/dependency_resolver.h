@@ -64,6 +64,10 @@ public:
     // whether one exists is a question for the package manager.
     static QStringList packageNamesForSoname(const QString& soname);
 
+    // Packages that must be fetched whatever the exclusion list says: the
+    // loader could not find what they carry, so the host does not have it.
+    void requirePackages(const QStringList& names);
+
     // Removes every symlink under root that resolves to nothing, and answers
     // how many there were.
     static int removeDanglingSymlinks(const QString& root);
@@ -87,6 +91,7 @@ public:
     
     // Check if a library/package should be excluded
     bool shouldExclude(const QString& name);
+    QSet<QString> m_requiredPackages;
 
     // Check if a concrete soname must stay a host dependency (glibc, GL, ...)
     bool shouldExcludeSoname(const QString& soname) const;
