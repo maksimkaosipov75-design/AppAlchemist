@@ -1593,6 +1593,36 @@ void AppDirBuilder::writeRuntimeModuleEnvironment(QTextStream& out, const QStrin
         out << "export GIO_MODULE_DIR=\"${HERE}/usr/lib/gio/modules\"\n";
     }
 
+    {
+        // Guile reads its own startup files from a directory compiled into the
+        // library. On a host without Guile installed that path does not exist
+        // and the interpreter aborts before the application gets to run, so
+        // the copy inside the bundle is pointed at explicitly.
+        const QDir guileShare(appDir.absoluteFilePath("usr/share/guile"));
+        const QStringList versions = guileShare.exists()
+            ? guileShare.entryList({"[0-9]*"}, QDir::Dirs | QDir::NoDotAndDotDot)
+            : QStringList();
+        for (const QString& version : versions) {
+            out << "export GUILE_LOAD_PATH=\"${HERE}/usr/share/guile/" << version
+                << "${GUILE_LOAD_PATH:+:${GUILE_LOAD_PATH}}\"\n";
+            for (const QString& libDir : {QStringLiteral("usr/lib"), QStringLiteral("usr/lib64")}) {
+                const QString compiled = QString("%1/guile/%2/ccache").arg(libDir, version);
+                if (QDir(appDir.absoluteFilePath(compiled)).exists()) {
+                    out << "export GUILE_LOAD_COMPILED_PATH=\"${HERE}/" << compiled
+                        << "${GUILE_LOAD_COMPILED_PATH:+:${GUILE_LOAD_COMPILED_PATH}}\"\n";
+                }
+            }
+            for (const QString& entry : QDir(appDir.absoluteFilePath("usr/lib"))
+                                            .entryList({"*-linux-gnu*"}, QDir::Dirs | QDir::NoDotAndDotDot)) {
+                const QString compiled = QString("usr/lib/%1/guile/%2/ccache").arg(entry, version);
+                if (QDir(appDir.absoluteFilePath(compiled)).exists()) {
+                    out << "export GUILE_LOAD_COMPILED_PATH=\"${HERE}/" << compiled
+                        << "${GUILE_LOAD_COMPILED_PATH:+:${GUILE_LOAD_COMPILED_PATH}}\"\n";
+                }
+            }
+        }
+    }
+
     if (QDir(appDir.absoluteFilePath("usr/share/glib-2.0/schemas")).exists()) {
         out << "export GSETTINGS_SCHEMA_DIR=\"${HERE}/usr/share/glib-2.0/schemas${GSETTINGS_SCHEMA_DIR:+:${GSETTINGS_SCHEMA_DIR}}\"\n";
     }

@@ -538,3 +538,69 @@ TEST_CASE("A packaging script never replaces the program it is named after",
         REQUIRE(placed.read(4) == QByteArray("\x7f""ELF", 4));
     }
 }
+
+TEST_CASE("AppRun points Guile at the startup files inside the bundle",
+          "[appdir][apprun][guile]") {
+    // Guile reads its startup files from a directory compiled into the
+    // library. On a host without Guile that path does not exist and the
+    // interpreter aborts before the application runs at all - aisleriot died
+    // this way, with no message of its own.
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+    const QString appDirPath = tempDir.path();
+
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/games"));
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/share/guile/3.0/ice-9"));
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/lib/x86_64-linux-gnu/guile/3.0/ccache"));
+    REQUIRE(TestHelpers::createSampleElf(appDirPath + "/usr/games/sample-game"));
+
+    PackageMetadata meta;
+    meta.package = "sample-game";
+    meta.mainExecutable = "usr/games/sample-game";
+    meta.executables = {"usr/games/sample-game"};
+
+    AppDirBuilder builder;
+    REQUIRE(builder.createAppRun(appDirPath, meta));
+
+    QFile appRun(appDirPath + "/AppRun");
+    REQUIRE(appRun.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QString content = appRun.readAll();
+    appRun.close();
+
+    SECTION("the startup files are named") {
+        REQUIRE(content.contains("GUILE_LOAD_PATH"));
+        REQUIRE(content.contains("${HERE}/usr/share/guile/3.0"));
+    }
+
+    SECTION("so are the compiled ones, under the architecture directory") {
+        REQUIRE(content.contains("GUILE_LOAD_COMPILED_PATH"));
+        REQUIRE(content.contains("usr/lib/x86_64-linux-gnu/guile/3.0/ccache"));
+    }
+
+    SECTION("a host setting is kept rather than replaced") {
+        REQUIRE(content.contains("${GUILE_LOAD_PATH:+:${GUILE_LOAD_PATH}}"));
+    }
+}
+
+TEST_CASE("A bundle without Guile says nothing about it", "[appdir][apprun][guile]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+    const QString appDirPath = tempDir.path();
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/bin"));
+    REQUIRE(TestHelpers::createSampleElf(appDirPath + "/usr/bin/sample-app"));
+
+    PackageMetadata meta;
+    meta.package = "sample-app";
+    meta.mainExecutable = "usr/bin/sample-app";
+    meta.executables = {"usr/bin/sample-app"};
+
+    AppDirBuilder builder;
+    REQUIRE(builder.createAppRun(appDirPath, meta));
+
+    QFile appRun(appDirPath + "/AppRun");
+    REQUIRE(appRun.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QString content = appRun.readAll();
+    appRun.close();
+
+    REQUIRE_FALSE(content.contains("GUILE_LOAD_PATH"));
+}
