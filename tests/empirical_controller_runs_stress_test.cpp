@@ -250,6 +250,18 @@ static void test_no_stranded_tmp_dirs(const QStringList& preexisting) {
 }
 
 int main(int argc, char* argv[]) {
+    // The check for stranded working directories looks at the temporary
+    // directory as a whole, so it must not be shared: a conversion running in
+    // another process creates one of its own there and would fail this test
+    // for something it has nothing to do with. A private temporary directory
+    // makes the check exact.
+    QTemporaryDir isolatedTemp(QDir(QDir::tempPath()).filePath("appalchemist-stress-XXXXXX"));
+    if (!isolatedTemp.isValid()) {
+        std::cerr << "Failed to create an isolated temporary directory" << std::endl;
+        return 1;
+    }
+    qputenv("TMPDIR", QFile::encodeName(isolatedTemp.path()));
+
     QCoreApplication app(argc, argv);
 
     QTemporaryDir fixtureDir;

@@ -54,6 +54,21 @@ public:
     
     // Set resolution settings
     void setSettings(const DependencySettings& settings);
+    // Expands a list of package names into the library packages they pull in,
+    // directly or through other packages. A distribution splits an application
+    // across packages and those across further ones, so the library an
+    // executable was built against is regularly two steps away from the
+    // package that carries the executable.
+    // Removes every symlink under root that resolves to nothing, and answers
+    // how many there were.
+    static int removeDanglingSymlinks(const QString& root);
+
+    // The packages worth taking out of an apt-cache dependency listing:
+    // every interpreter module, and shared libraries up to a sane limit.
+    static QStringList selectRuntimePackages(const QString& aptOutput,
+                                             const QStringList& already);
+
+    QStringList expandLibraryDependencies(const QStringList& packageNames);
     DependencySettings settings() const { return m_settings; }
     
     // Parse dependencies from package control file
@@ -116,6 +131,7 @@ private:
     
     // Check if library is available on the system
     QString findSystemLibrary(const QString& libName);
+
     
     // Download a package and extract libraries
     bool downloadAndExtract(const QString& packageName, const QString& outputDir);

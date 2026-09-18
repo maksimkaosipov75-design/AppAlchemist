@@ -1,6 +1,9 @@
 #include <catch2/catch_test_macros.hpp>
 #include "debparser.h"
 #include "rpmparser.h"
+#include "rpm_repository.h"
+#include "dependency_resolver.h"
+#include "packagetoappimagepipeline.h"
 #include "tarballparser.h"
 #include "test_helpers.h"
 #include <QTemporaryDir>
@@ -621,3 +624,189 @@ TEST_CASE("TarballParser Empirical Challenge: Truncated archives and corrupted z
     }
 }
 
+
+TEST_CASE("RPM release tags identify the distribution release", "[rpm][repository]") {
+    // Converting an .rpm on another distribution means fetching what it needs
+    // from the repository it was built for, and the release tag is what says
+    // which one that is.
+    SECTION("a Fedora tag yields its release") {
+        REQUIRE(RpmRepository::releaseFromRpmTag("22.fc41") == "41");
+        REQUIRE(RpmRepository::releaseFromRpmTag("4.fc39") == "39");
+        REQUIRE(RpmRepository::releaseFromRpmTag("1.20240101gitabcdef.fc42") == "42");
+    }
+
+    SECTION("tags of other distributions are not mistaken for Fedora") {
+        REQUIRE(RpmRepository::releaseFromRpmTag("1.el9").isEmpty());
+        REQUIRE(RpmRepository::releaseFromRpmTag("lp155.2.1").isEmpty());
+        REQUIRE(RpmRepository::releaseFromRpmTag("").isEmpty());
+    }
+
+    SECTION("a repository without a release refuses to work") {
+        RpmRepository repository;
+        REQUIRE_FALSE(repository.isUsable());
+        REQUIRE_FALSE(repository.ensureMetadata());
+
+        repository.setRelease("41");
+        REQUIRE(repository.isUsable());
+    }
+
+    SECTION("nothing is requested when nothing is wanted") {
+        RpmRepository repository;
+        repository.setRelease("41");
+        REQUIRE(repository.resolve({}, {}).isEmpty());
+        REQUIRE(repository.download({}, "/tmp").isEmpty());
+    }
+}
+
+TEST_CASE("Companion packages carry parts of the application", "[pipeline][companions]") {
+    // quodlibet keeps its own Python module in a package called "exfalso":
+    // nothing in that name says it belongs to quodlibet, so a rule based on
+    // names alone leaves the application unable to import itself.
+    const QStringList quodlibetDepends = {
+        "exfalso (= 4.6.0-3)", "gir1.2-gst-plugins-base-1.0", "gstreamer1.0-alsa",
+        "python3-mutagen", "libc6 (>= 2.34)"
+    };
+
+    SECTION("a dependency pinned to the same version is part of the application") {
+        const QStringList companions = PackageToAppImagePipeline::selectCompanionPackages(
+            quodlibetDepends, "quodlibet", false);
+        REQUIRE(companions.contains("exfalso"));
+        REQUIRE(companions.contains("python3-mutagen"));
+        // A plain runtime dependency is not part of the application and is
+        // resolved as a library instead, so it is not pulled in wholesale.
+        REQUIRE_FALSE(companions.contains("gstreamer1.0-alsa"));
+    }
+
+    SECTION("a compiled application takes only its own data and modules") {
+        const QStringList companions = PackageToAppImagePipeline::selectCompanionPackages(
+            {"foo-common", "foo-data", "libc6 (>= 2.34)", "gir1.2-gtk-3.0", "libpng16-16"},
+            "foo", false);
+        REQUIRE(companions.contains("foo-common"));
+        REQUIRE(companions.contains("foo-data"));
+        REQUIRE(companions.contains("gir1.2-gtk-3.0"));
+        REQUIRE_FALSE(companions.contains("libc6"));
+        REQUIRE_FALSE(companions.contains("libpng16-16"));
+    }
+
+    SECTION("version constraints are not mistaken for package names") {
+        const QStringList companions = PackageToAppImagePipeline::selectCompanionPackages(
+            quodlibetDepends, "quodlibet", false);
+        for (const QString& name : companions) {
+            REQUIRE_FALSE(name.contains('('));
+            REQUIRE_FALSE(name.contains(' '));
+        }
+    }
+
+    SECTION("each package is taken once") {
+        const QStringList companions = PackageToAppImagePipeline::selectCompanionPackages(
+            {"foo-data", "foo-data (>= 1.0)", "foo-data"}, "foo", false);
+        REQUIRE(companions.size() == 1);
+    }
+}
+
+TEST_CASE("A script entry point has no libraries of its own", "[pipeline][deps]") {
+    // Asking the loader about a script always fails. Reading that failure as
+    // an unresolved dependency used to abandon the conversion of every
+    // interpreted application, whose entry point is a script by definition.
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    const QString script = tempDir.filePath("launcher");
+    QFile file(script);
+    REQUIRE(file.open(QIODevice::WriteOnly));
+    file.write("#!/usr/bin/python3\nimport quodlibet\n");
+    file.close();
+    QFile::setPermissions(script, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+
+    PackageToAppImagePipeline pipeline;
+    REQUIRE(pipeline.findMissingRuntimeLibraries(script).isEmpty());
+
+    SECTION("a path that names nothing is answered the same way") {
+        REQUIRE(pipeline.findMissingRuntimeLibraries(tempDir.filePath("absent")).isEmpty());
+        REQUIRE(pipeline.findMissingRuntimeLibraries("").isEmpty());
+    }
+}
+
+TEST_CASE("Interpreter modules are never dropped from a dependency closure",
+          "[deps][expansion]") {
+    // A missing shared library is still found: the loader names it and it is
+    // copied from the host. A missing Python module is invisible until the
+    // program dies on its first import, so a limit that drops modules makes
+    // the application unusable - quodlibet lost python3-feedparser this way.
+    QString listing;
+    for (int i = 0; i < 200; ++i) {
+        listing += QString("lib-filler-%1\n").arg(i);
+    }
+    listing += "python3-feedparser\n";
+    listing += "gir1.2-gtk-3.0\n";
+    listing += "quodlibet\n";          // not a library or a module
+    listing += "  Depends: libc6\n";   // a dependency line, not a name
+    listing += "libc6:amd64\n";        // architecture-qualified
+
+    const QStringList selected = DependencyResolver::selectRuntimePackages(listing, {"exfalso"});
+
+    SECTION("every module survives the limit") {
+        REQUIRE(selected.contains("python3-feedparser"));
+        REQUIRE(selected.contains("gir1.2-gtk-3.0"));
+    }
+
+    SECTION("libraries are capped, not the modules") {
+        int libraries = 0;
+        for (const QString& name : selected) {
+            if (name.startsWith("lib-filler-")) {
+                libraries++;
+            }
+        }
+        REQUIRE(libraries == 80);
+    }
+
+    SECTION("nothing but libraries and modules is taken") {
+        REQUIRE_FALSE(selected.contains("quodlibet"));
+        REQUIRE_FALSE(selected.contains("libc6:amd64"));
+        for (const QString& name : selected) {
+            REQUIRE_FALSE(name.contains(' '));
+        }
+    }
+}
+
+TEST_CASE("An architecture qualifier is not part of a package name",
+          "[pipeline][companions]") {
+    const QStringList companions = PackageToAppImagePipeline::selectCompanionPackages(
+        {"python3:any", "foo-data:amd64"}, "foo", false);
+    REQUIRE_FALSE(companions.contains("python3:any"));
+    REQUIRE(companions.contains("foo-data"));
+}
+
+TEST_CASE("A bundle ships no symlink that resolves to nothing", "[deps][symlinks]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+    const QString root = tempDir.path();
+
+    REQUIRE(QDir().mkpath(root + "/usr/share/backgrounds/theme"));
+    REQUIRE(QDir().mkpath(root + "/usr/lib/plugins"));
+
+    QFile real(root + "/usr/share/backgrounds/theme/present.jpg");
+    REQUIRE(real.open(QIODevice::WriteOnly));
+    real.write("image");
+    real.close();
+
+    REQUIRE(QFile::link("present.jpg", root + "/usr/share/backgrounds/theme/good.jpg"));
+    REQUIRE(QFile::link("absent.jpg", root + "/usr/share/backgrounds/theme/broken.jpg"));
+    REQUIRE(QFile::link("libgone.so.1", root + "/usr/lib/plugins/libplugin.so"));
+
+    const int removed = DependencyResolver::removeDanglingSymlinks(root);
+
+    REQUIRE(removed == 2);
+    REQUIRE_FALSE(QFileInfo(root + "/usr/share/backgrounds/theme/broken.jpg").isSymLink());
+    REQUIRE_FALSE(QFileInfo(root + "/usr/lib/plugins/libplugin.so").isSymLink());
+
+    SECTION("a link that resolves is left alone") {
+        const QFileInfo good(root + "/usr/share/backgrounds/theme/good.jpg");
+        REQUIRE(good.isSymLink());
+        REQUIRE(good.exists());
+    }
+
+    SECTION("running it again finds nothing left to do") {
+        REQUIRE(DependencyResolver::removeDanglingSymlinks(root) == 0);
+    }
+}

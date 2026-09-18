@@ -1547,8 +1547,33 @@ void AppDirBuilder::writeRuntimeModuleEnvironment(QTextStream& out, const QStrin
         out << "export GSETTINGS_SCHEMA_DIR=\"${HERE}/usr/share/glib-2.0/schemas${GSETTINGS_SCHEMA_DIR:+:${GSETTINGS_SCHEMA_DIR}}\"\n";
     }
 
-    if (QDir(appDir.absoluteFilePath("usr/lib/girepository-1.0")).exists()) {
-        out << "export GI_TYPELIB_PATH=\"${HERE}/usr/lib/girepository-1.0${GI_TYPELIB_PATH:+:${GI_TYPELIB_PATH}}\"\n";
+    {
+        // Introspection data sits in usr/lib/girepository-1.0 on some
+        // distributions and under the architecture directory on others; a
+        // Python application asking for a namespace fails outright when the
+        // path is not exported.
+        QStringList typelibDirs;
+        for (const QString& candidate : {QStringLiteral("usr/lib/girepository-1.0"),
+                                         QStringLiteral("usr/lib64/girepository-1.0")}) {
+            if (QDir(appDir.absoluteFilePath(candidate)).exists()) {
+                typelibDirs << candidate;
+            }
+        }
+        for (const QString& entry : QDir(appDir.absoluteFilePath("usr/lib"))
+                                        .entryList({"*-linux-gnu*"}, QDir::Dirs | QDir::NoDotAndDotDot)) {
+            const QString candidate = QString("usr/lib/%1/girepository-1.0").arg(entry);
+            if (QDir(appDir.absoluteFilePath(candidate)).exists()) {
+                typelibDirs << candidate;
+            }
+        }
+        if (!typelibDirs.isEmpty()) {
+            QStringList expanded;
+            for (const QString& dir : typelibDirs) {
+                expanded << QString("${HERE}/%1").arg(dir);
+            }
+            out << "export GI_TYPELIB_PATH=\"" << expanded.join(":")
+                << "${GI_TYPELIB_PATH:+:${GI_TYPELIB_PATH}}\"\n";
+        }
     }
 
     const QString loadersDir = "usr/lib/gdk-pixbuf-2.0/2.10.0/loaders";
@@ -2631,9 +2656,13 @@ QStringList AppDirBuilder::relocatePackagePaths(const QString& appDirPath,
         return relocated;
     }
 
-    static const QStringList prefixes = {
-        "usr/share", "usr/lib", "usr/libexec", "usr/lib64", "opt"
-    };
+    QStringList prefixes = {"usr/share", "usr/lib", "usr/libexec", "usr/lib64", "opt"};
+    // Distributions keep architecture specific files in usr/lib/<triplet>, and
+    // a package's private directory sits there just as often as in usr/lib.
+    for (const QString& entry : QDir(appDir.absoluteFilePath("usr/lib"))
+                                    .entryList({"*-linux-gnu*"}, QDir::Dirs | QDir::NoDotAndDotDot)) {
+        prefixes << QString("usr/lib/%1").arg(entry);
+    }
 
     // Before deciding what to rewrite, bring in whatever the package refers to
     // but does not ship. These come from dependencies that were installed

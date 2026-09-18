@@ -1,4 +1,7 @@
 #include "packagetoappimagepipeline.h"
+#include "rpm_repository.h"
+#include "rpmparser.h"
+#include "appdetector.h"
 #include "utils.h"
 #include <QStandardPaths>
 #include <QDir>
@@ -536,6 +539,112 @@ bool PackageToAppImagePipeline::verifyAppDirReadiness(const QString& executableP
     return true;
 }
 
+QStringList PackageToAppImagePipeline::selectCompanionPackages(const QStringList& depends,
+                                                               const QString& packageName,
+                                                               bool interpreted) {
+    Q_UNUSED(interpreted);
+    QStringList companions;
+    for (const QString& dependency : depends) {
+        // "python3:any" names the package python3: the qualifier says which
+        // architecture satisfies it, and is not part of the name.
+        const QString name = dependency.section(' ', 0, 0).section(':', 0, 0).trimmed();
+        if (name.isEmpty() || companions.contains(name)) {
+            continue;
+        }
+        const bool namedAfterPackage = !packageName.isEmpty() && name.startsWith(packageName + "-");
+        const bool looksLikeData = name.endsWith("-common") || name.endsWith("-data");
+        // A dependency pinned to one exact version is built from the same
+        // source as the package itself: that is how a distribution splits one
+        // application across several packages, and the name need say nothing
+        // about it - quodlibet keeps its own Python module in "exfalso".
+        const bool sameSource = dependency.contains("(= ");
+        // An interpreted application is nothing without its modules, and they
+        // live in packages of their own. Without them the program starts and
+        // dies on its first import.
+        const bool interpreterModule = name.startsWith("python3-") ||
+                                       name.startsWith("python-") ||
+                                       name.startsWith("gir1.2-");
+        if (sameSource || namedAfterPackage || looksLikeData || interpreterModule) {
+            companions << name;
+        }
+    }
+    return companions;
+}
+
+bool PackageToAppImagePipeline::fetchRpmDependencies(const QStringList& missingSonames) {
+    if (m_packageType != PackageFormat::Rpm) {
+        return false;
+    }
+
+    const RpmHeaderInfo header = RpmParser::readRpmHeader(m_packagePath);
+    const QString release = RpmRepository::releaseFromRpmTag(header.release);
+    if (release.isEmpty()) {
+        emit log("The package does not say which release it was built for; "
+                 "its dependencies cannot be fetched");
+        return false;
+    }
+
+    RpmRepository repository;
+    connect(&repository, &RpmRepository::log, this, &PackageToAppImagePipeline::log);
+    repository.setRelease(release);
+    repository.setArchitecture(detectSystemArchitecture());
+
+    if (!repository.ensureMetadata()) {
+        return false;
+    }
+
+    QSet<QString> sonames;
+    for (const QString& soname : missingSonames) {
+        sonames.insert(soname);
+    }
+
+    // The package's own companions - its data, its private libraries - are
+    // named in its requirements alongside the sonames.
+    QSet<QString> packageNames;
+    for (const QString& requirement : m_metadata.depends) {
+        const QString name = requirement.section(' ', 0, 0).trimmed();
+        if (name.isEmpty() || name.startsWith('/') || name.contains(".so")) {
+            continue;
+        }
+        packageNames.insert(name);
+    }
+
+    const QHash<QString, QString> located = repository.resolve(sonames, packageNames);
+    if (located.isEmpty()) {
+        return false;
+    }
+
+    const QString downloadDir = m_tempDir + "/rpm_dependencies";
+    const QStringList packages = repository.download(located.values(), downloadDir);
+    if (packages.isEmpty()) {
+        return false;
+    }
+
+    // Unpack straight into the AppDir: the layout inside an RPM already
+    // matches the one the bundle uses.
+    RpmParser parser;
+    int unpacked = 0;
+    for (const QString& package : packages) {
+        const QString stage = m_tempDir + "/rpm_stage";
+        SubprocessWrapper::removeDirectory(stage);
+        QDir().mkpath(stage);
+        if (!parser.extractRpm(package, stage)) {
+            emit log(QString("Could not unpack %1").arg(QFileInfo(package).fileName()));
+            continue;
+        }
+        const QString payload = QDir(stage).exists("data") ? stage + "/data" : stage;
+        if (SubprocessWrapper::copyDirectory(payload, m_appDirPath)) {
+            unpacked++;
+        }
+        SubprocessWrapper::removeDirectory(stage);
+    }
+
+    emit log(QString("Bundled %1 packages from the Fedora %2 repository")
+                 .arg(unpacked)
+                 .arg(release));
+    return unpacked > 0;
+}
+
 void PackageToAppImagePipeline::bundleAppDirLibraries(const QString& stageLabel) {
     if (!m_dependencySettings.bundleSystemLibraries) {
         emit log(QString("%1 skipped library bundling (disabled in settings).").arg(stageLabel));
@@ -545,10 +654,93 @@ void PackageToAppImagePipeline::bundleAppDirLibraries(const QString& stageLabel)
     emit progress(62, "Bundling shared libraries...");
     m_dependencyResolver->setSettings(m_dependencySettings);
 
-    const LibraryBundleReport report = m_dependencyResolver->bundleSystemLibraries(m_appDirPath);
+    LibraryBundleReport report = m_dependencyResolver->bundleSystemLibraries(m_appDirPath);
     emit log(QString("%1 library bundling: %2").arg(stageLabel, report.summary()));
 
+    // Distributions split an application across packages: the program in one,
+    // the libraries it was built with in another. Whatever is not installed on
+    // this machine cannot be bundled, and the result would start nowhere else
+    // either. Fetch those packages and bundle again rather than shipping a
+    // bundle that is known to be broken.
+    // Each round of fetching reveals the libraries the newly bundled ones need
+    // in turn, so this repeats while it keeps making progress.
+    if (m_packageType == PackageFormat::Rpm) {
+        for (int round = 0; round < 4 && report.ran && !report.unresolved.isEmpty(); ++round) {
+            const int before = report.unresolved.size();
+            emit log(QString("%1 has %2 unresolved libraries; fetching them from the distribution "
+                             "the package was built for")
+                         .arg(stageLabel)
+                         .arg(before));
+            if (!fetchRpmDependencies(report.unresolved)) {
+                break;
+            }
+            const QStringList relocated =
+                m_appDirBuilder->relocatePackagePaths(m_appDirPath, m_metadata);
+            Q_UNUSED(relocated);
+            report = m_dependencyResolver->bundleSystemLibraries(m_appDirPath);
+            emit log(QString("%1 library bundling after fetch: %2").arg(stageLabel, report.summary()));
+            if (report.unresolved.size() >= before) {
+                break;   // nothing more to gain from another round
+            }
+        }
+        m_triedDependencyFetch = true;
+    }
+
+    if (report.ran && !report.unresolved.isEmpty() && !m_metadata.depends.isEmpty() &&
+        !m_triedDependencyFetch) {
+        m_triedDependencyFetch = true;
+        emit log(QString("%1 has %2 unresolved libraries; fetching the packages that provide them")
+                     .arg(stageLabel)
+                     .arg(report.unresolved.size()));
+
+        DependencySettings fetchSettings = m_dependencySettings;
+        fetchSettings.enabled = true;
+        m_dependencyResolver->setSettings(fetchSettings);
+
+        const QString fetched = m_tempDir + "/fetched_deps";
+        QDir().mkpath(fetched);
+
+        // The library an executable was built against often belongs to a
+        // package that the declared dependencies only reach through another
+        // one, so the list is expanded before anything is downloaded.
+        QStringList toFetch = m_metadata.depends;
+        const QStringList transitive =
+            m_dependencyResolver->expandLibraryDependencies(m_metadata.depends);
+        if (!transitive.isEmpty()) {
+            emit log(QString("Including %1 library packages reached through other packages")
+                         .arg(transitive.size()));
+            toFetch << transitive;
+        }
+        m_dependencyResolver->resolveDependencies(toFetch, fetched);
+
+        if (SubprocessWrapper::copyDirectory(fetched, m_appDirPath)) {
+            emit log("Bundled the packages the application was built against");
+            m_dependencyResolver->setSettings(m_dependencySettings);
+            report = m_dependencyResolver->bundleSystemLibraries(m_appDirPath);
+            emit log(QString("%1 library bundling after fetch: %2").arg(stageLabel, report.summary()));
+        } else {
+            m_dependencyResolver->setSettings(m_dependencySettings);
+        }
+    }
+
+    if (report.ran && !report.unresolved.isEmpty()) {
+        emit log(QString("WARNING: %1 libraries are still missing and the application may not "
+                         "start on a machine without them: %2")
+                     .arg(report.unresolved.size())
+                     .arg(report.unresolved.join(", ").left(200)));
+    }
+
     if (report.ran && !report.bundled.isEmpty()) {
+        // Directories that arrived with the bundled libraries - an
+        // application's loadable backends live in one - were not in the AppDir
+        // when its references were first rewritten, so run that pass again.
+        const QStringList lateRelocations =
+            m_appDirBuilder->relocatePackagePaths(m_appDirPath, m_metadata);
+        if (!lateRelocations.isEmpty()) {
+            emit log(QString("Made %1 more package paths bundle-relative after bundling")
+                         .arg(lateRelocations.size()));
+        }
+
         // AppRun was written while building the AppDir, before the bundled
         // GLib/GTK module trees existed. Regenerate it so it exports
         // GIO_MODULE_DIR, GDK_PIXBUF_MODULE_FILE and friends.
@@ -599,6 +791,13 @@ bool PackageToAppImagePipeline::optimizeBuiltAppDir(const QString& stageLabel) {
 }
 
 bool PackageToAppImagePipeline::packageBuiltAppDir(const QString& stageLabel) {
+    const int removedLinks = DependencyResolver::removeDanglingSymlinks(m_appDirPath);
+    if (removedLinks > 0) {
+        emit log(QString("%1 removed %2 symlinks that resolved to nothing")
+                     .arg(stageLabel)
+                     .arg(removedLinks));
+    }
+
     emit progress(85, "Building AppImage...");
     if (!buildAppImage()) {
         emit log(QString("%1 failed while building AppImage.").arg(stageLabel));
@@ -731,6 +930,19 @@ QStringList PackageToAppImagePipeline::findMissingRuntimeLibraries(const QString
         return missingLibraries;
     }
 
+    // A script has no libraries of its own - the interpreter it names does.
+    // Asking the loader about it always fails, and treating that failure as an
+    // unresolved dependency used to abandon the conversion of every
+    // interpreted application.
+    QFile entry(executablePath);
+    if (entry.open(QIODevice::ReadOnly)) {
+        const QByteArray magic = entry.read(4);
+        entry.close();
+        if (magic != QByteArray("\x7f""ELF", 4)) {
+            return missingLibraries;
+        }
+    }
+
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     const QString existingLdPath = env.value("LD_LIBRARY_PATH");
     env.insert("LD_LIBRARY_PATH", QString("%1/usr/lib:%2").arg(m_appDirPath, existingLdPath));
@@ -806,6 +1018,56 @@ bool PackageToAppImagePipeline::analyzeDependencies() {
         emit log(QString("WARNING: %1").arg(warning));
     }
     
+    // Distributions ship an application's data in a companion package:
+    // <name>-common, <name>-data and the like hold the settings schemas, the
+    // interface definitions and the icons, while the package named after the
+    // application holds only the executable. Converting just the latter
+    // produces a bundle that starts and immediately fails on its own settings,
+    // so these companions are always fetched - they are small and belong to
+    // the application in everything but packaging.
+    if (!m_metadata.depends.isEmpty()) {
+        const QString base = m_metadata.package.trimmed();
+
+        // For an interpreted application the dependency list is the
+        // application: its modules, and often its own code, are packaged
+        // separately under names that follow no rule. Bundling only the
+        // packages whose names look related leaves it unable to import
+        // itself, so everything it declares is taken.
+        const bool interpreted = AppDetector::isPython(m_metadata.mainExecutable) ||
+                                 AppDetector::isPythonLauncherScript(m_metadata.mainExecutable);
+
+        QStringList companions =
+            selectCompanionPackages(m_metadata.depends, base, interpreted);
+
+        if (!companions.isEmpty()) {
+            // A module package depends on further module packages, and the
+            // application fails on the first import that is missing, so the
+            // list is followed to its end.
+            const QStringList reached = m_dependencyResolver->expandLibraryDependencies(companions);
+            for (const QString& name : reached) {
+                if (!companions.contains(name)) {
+                    companions << name;
+                }
+            }
+            emit log(QString("Fetching companion packages: %1").arg(companions.join(", ").left(160)));
+            DependencySettings companionSettings = m_dependencySettings;
+            companionSettings.enabled = true;
+            m_dependencyResolver->setSettings(companionSettings);
+
+            const QString companionDir = m_tempDir + "/companion_packages";
+            QDir().mkpath(companionDir);
+            m_dependencyResolver->resolveDependencies(companions, companionDir);
+
+            const QString mergeTarget = QDir(m_extractedPackageDir).exists(QStringLiteral("data"))
+                ? m_extractedPackageDir + "/data"
+                : m_extractedPackageDir;
+            if (SubprocessWrapper::copyDirectory(companionDir, mergeTarget)) {
+                emit log("Merged companion package contents");
+            }
+            m_dependencyResolver->setSettings(m_dependencySettings);
+        }
+    }
+
     // Resolve and download missing dependencies if enabled
     if (m_dependencySettings.enabled && !m_metadata.depends.isEmpty()) {
         emit log("Resolving package dependencies...");

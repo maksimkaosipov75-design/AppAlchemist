@@ -166,6 +166,10 @@ TEST_CASE("Library bundling prefers package-provided libraries over host copies"
     // whose target was never copied in.
     REQUIRE(TestHelpers::createSampleElf(appDirPath + "/usr/lib/libsample.so.1"));
     REQUIRE(QFile::link("libdangling.so.2.1", appDirPath + "/usr/lib/libdangling.so.2"));
+    // Plugin trees keep libraries of their own several directories down, and a
+    // link left dangling there fails the same way.
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/lib/gstreamer-1.0"));
+    REQUIRE(QFile::link("libgstmissing.so.0.0", appDirPath + "/usr/lib/gstreamer-1.0/libgstmissing.so"));
 
     DependencyResolver resolver;
     const LibraryBundleReport report = resolver.bundleSystemLibraries(appDirPath);
@@ -178,6 +182,11 @@ TEST_CASE("Library bundling prefers package-provided libraries over host copies"
 
     SECTION("symlinks that resolve to nothing are not shipped") {
         const QFileInfo dangling(appDirPath + "/usr/lib/libdangling.so.2");
+        REQUIRE_FALSE((dangling.isSymLink() && !dangling.exists()));
+    }
+
+    SECTION("a dangling symlink deep in a plugin tree is not shipped either") {
+        const QFileInfo dangling(appDirPath + "/usr/lib/gstreamer-1.0/libgstmissing.so");
         REQUIRE_FALSE((dangling.isSymLink() && !dangling.exists()));
     }
 }

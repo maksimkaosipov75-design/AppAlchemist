@@ -1,4 +1,5 @@
 #include "dependency_resolver.h"
+#include "repository_browser.h"
 #include "utils.h"
 #include <QFile>
 #include <QDir>
@@ -539,17 +540,41 @@ void DependencyResolver::bundleRuntimeModules(const QString& appDirPath,
         }
     }
 
-    // GSettings schemas: a bundled GIO/GTK refuses to start without them.
-    if (anySonameStartsWith(bundledSonames, "libgio-2.0") ||
-        anySonameStartsWith(bundledSonames, "libgtk-")) {
-        const QString destination = appDir.absoluteFilePath("usr/share/glib-2.0/schemas");
-        if (!QDir(destination).exists() && QDir("/usr/share/glib-2.0/schemas").exists()) {
-            if (SubprocessWrapper::copyDirectory("/usr/share/glib-2.0/schemas", destination)) {
-                const QString compiler = QStandardPaths::findExecutable("glib-compile-schemas");
-                if (!compiler.isEmpty()) {
-                    SubprocessWrapper::execute(compiler, {destination}, {}, 60000);
-                }
-                emit log("  Bundled GSettings schemas.");
+    // GSettings schemas. Two things go wrong without this: a bundled GIO finds
+    // none of the desktop's schemas, and a package that ships its own schema
+    // has it in source form only. GSettings reads the compiled file, so an
+    // application asking for its settings aborts with "Settings schema ... is
+    // not installed" - which is how most GTK, GNOME and MATE programs failed.
+    const QString schemaDir = appDir.absoluteFilePath("usr/share/glib-2.0/schemas");
+    const bool bundlesGlib = anySonameStartsWith(bundledSonames, "libgio-2.0") ||
+                             anySonameStartsWith(bundledSonames, "libgtk-");
+    const bool packageShipsSchemas =
+        QDir(schemaDir).exists() &&
+        !QDir(schemaDir).entryList({"*.gschema.xml", "*.enums.xml"}, QDir::Files).isEmpty();
+
+    if (bundlesGlib && QDir("/usr/share/glib-2.0/schemas").exists()) {
+        QDir().mkpath(schemaDir);
+        // The package's own schemas win: only what is missing comes from the host.
+        const QDir hostSchemas("/usr/share/glib-2.0/schemas");
+        for (const QFileInfo& entry : hostSchemas.entryInfoList(QDir::Files)) {
+            const QString target = QDir(schemaDir).absoluteFilePath(entry.fileName());
+            if (!QFileInfo::exists(target)) {
+                SubprocessWrapper::copyFile(entry.absoluteFilePath(), target);
+            }
+        }
+        emit log("  Bundled GSettings schemas.");
+    }
+
+    if (bundlesGlib || packageShipsSchemas) {
+        const QDir schemas(schemaDir);
+        if (schemas.exists() && !schemas.entryList({"*.gschema.xml"}, QDir::Files).isEmpty()) {
+            const QString compiler = QStandardPaths::findExecutable("glib-compile-schemas");
+            if (compiler.isEmpty()) {
+                emit log("  WARNING: glib-compile-schemas not found; settings schemas stay uncompiled");
+            } else if (SubprocessWrapper::execute(compiler, {schemaDir}, {}, 60000).success) {
+                emit log("  Compiled GSettings schemas.");
+            } else {
+                emit log("  WARNING: failed to compile GSettings schemas");
             }
         }
     }
@@ -858,16 +883,24 @@ LibraryBundleReport DependencyResolver::bundleSystemLibraries(const QString& app
     // resolve would break the AppImage on a host that lacks the library, which
     // is exactly what bundling is meant to prevent. Fill it from the host when
     // possible, otherwise remove it and report the soname as unresolved.
-    for (const QString& libDir : {lib64Dir, lib32Dir}) {
-        QDir dir(libDir);
-        if (!dir.exists()) {
-            continue;
-        }
-        const QFileInfoList entries = dir.entryInfoList(QDir::Files | QDir::System | QDir::NoDotAndDotDot);
-        for (const QFileInfo& entry : entries) {
-            if (!entry.isSymLink() || entry.exists()) {
-                continue;
+    // Plugin trees keep libraries of their own, several directories deep, and
+    // a link left dangling there fails just as loudly as one in the library
+    // directory itself, so the whole bundle is swept.
+    QFileInfoList brokenLinks;
+    {
+        QDirIterator walker(appDirPath,
+                            QDir::Files | QDir::System | QDir::NoDotAndDotDot,
+                            QDirIterator::Subdirectories);
+        while (walker.hasNext()) {
+            walker.next();
+            const QFileInfo candidate = walker.fileInfo();
+            if (candidate.isSymLink() && !candidate.exists()) {
+                brokenLinks << candidate;
             }
+        }
+    }
+    {
+        for (const QFileInfo& entry : brokenLinks) {
 
             const QString brokenPath = entry.absoluteFilePath();
             const QString soname = entry.fileName();
@@ -1117,6 +1150,103 @@ void DependencyResolver::parseVersionConstraint(const QString& dep, QString& nam
         op.clear();
         version.clear();
     }
+}
+
+int DependencyResolver::removeDanglingSymlinks(const QString& root) {
+    // A link that resolves to nothing is shipped as a broken file: the loader
+    // fails on it, and packaging tools report it. Resources are copied in
+    // after libraries are bundled, so this runs once more at the very end.
+    int removed = 0;
+    QDirIterator walker(root, QDir::Files | QDir::System | QDir::NoDotAndDotDot,
+                        QDirIterator::Subdirectories);
+    QStringList broken;
+    while (walker.hasNext()) {
+        walker.next();
+        const QFileInfo candidate = walker.fileInfo();
+        if (candidate.isSymLink() && !candidate.exists()) {
+            broken << candidate.absoluteFilePath();
+        }
+    }
+    for (const QString& path : broken) {
+        if (QFile::remove(path)) {
+            removed++;
+        }
+    }
+    return removed;
+}
+
+QStringList DependencyResolver::selectRuntimePackages(const QString& aptOutput,
+                                                     const QStringList& already) {
+    // Two kinds of package matter at runtime, and they are not equally
+    // replaceable. A missing shared library still gets found: the loader names
+    // it and it is copied from the host. A missing interpreter module is
+    // invisible until the program dies on its first import, and nothing else
+    // can supply it - so modules are all taken, while plain libraries, which
+    // are merely a convenience here, are capped to keep the bundle sane.
+    constexpr int kLibraryLimit = 80;
+
+    QStringList modules;
+    QStringList libraries;
+
+    const QStringList lines = aptOutput.split('\n');
+    for (const QString& line : lines) {
+        const QString candidate = line.trimmed();
+        if (candidate.isEmpty() || candidate.startsWith('|') || candidate.contains(':') ||
+            candidate.contains(' ')) {
+            continue;   // a dependency line or an architecture-qualified name
+        }
+        if (already.contains(candidate) || modules.contains(candidate) ||
+            libraries.contains(candidate)) {
+            continue;
+        }
+        if (candidate.startsWith("python3-") || candidate.startsWith("python-") ||
+            candidate.startsWith("gir1.2-")) {
+            modules << candidate;
+        } else if (candidate.startsWith("lib") && libraries.size() < kLibraryLimit) {
+            libraries << candidate;
+        }
+    }
+
+    return modules + libraries;
+}
+
+QStringList DependencyResolver::expandLibraryDependencies(const QStringList& packageNames) {
+    QStringList expanded;
+    if (packageNames.isEmpty()) {
+        return expanded;
+    }
+
+    QStringList query;
+    for (const QString& name : packageNames) {
+        const QString cleaned = name.section(' ', 0, 0).trimmed();
+        if (!cleaned.isEmpty() && SubprocessWrapper::isSafePackageName(cleaned)) {
+            query << cleaned;
+        }
+    }
+    if (query.isEmpty()) {
+        return expanded;
+    }
+
+    if (RepositoryBrowser::detectPackageManager() != PackageManager::APT) {
+        return expanded;   // only Debian's tooling is queried this way
+    }
+
+    QStringList arguments = {
+        "depends", "--recurse", "--no-recommends", "--no-suggests",
+        "--no-conflicts", "--no-breaks", "--no-replaces", "--no-enhances",
+        "--implicit"
+    };
+    arguments << "--";
+    arguments << query;
+
+    const ProcessResult result = SubprocessWrapper::execute("apt-cache", arguments, {}, 120000);
+    if (!result.success) {
+        return expanded;
+    }
+
+    expanded = selectRuntimePackages(result.stdoutOutput, query);
+
+    return expanded;
 }
 
 QString DependencyResolver::findSystemLibrary(const QString& libName) {

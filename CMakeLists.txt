@@ -55,6 +55,7 @@ set(APPALCHEMIST_CORE_SOURCES
     src/utils.cpp
     src/archive_extractor.cpp
     src/cache_manager.cpp
+    src/rpm_repository.cpp
 )
 
 set(APPALCHEMIST_CORE_HEADERS
@@ -80,6 +81,7 @@ set(APPALCHEMIST_CORE_HEADERS
     include/utils.h
     include/archive_extractor.h
     include/cache_manager.h
+    include/rpm_repository.h
 )
 
 add_library(appalchemist_core STATIC

@@ -70,7 +70,13 @@ private:
     bool packageBuiltAppDir(const QString& stageLabel);
     bool runRuntimeProbe(const QString& executablePath, const QString& stageLabel, bool requiredForSuccess);
     QString findPrimaryAppDirExecutable() const;
+public:
+    // The libraries the given executable links against and the loader cannot
+    // find. A script is not an executable in this sense: it has no libraries
+    // of its own, and the answer for one is always empty.
     QStringList findMissingRuntimeLibraries(const QString& executablePath) const;
+
+private:
 
     QString m_packagePath;
     QString m_outputPath;
@@ -103,6 +109,24 @@ private:
     DependencyResolver* m_dependencyResolver;
     OptimizationSettings m_optimizationSettings;
     DependencySettings m_dependencySettings;
+    // Fetching the packages that provide missing libraries is attempted once
+    // per conversion: a second round would download the same set again.
+    bool m_triedDependencyFetch = false;
+
+public:
+    // The packages that carry parts of the application itself rather than
+    // system libraries. For an interpreted application that is everything it
+    // declares: its own code is routinely split into a package whose name
+    // follows no convention (quodlibet keeps its module in "exfalso").
+    static QStringList selectCompanionPackages(const QStringList& depends,
+                                               const QString& packageName,
+                                               bool interpreted);
+
+private:
+
+    // Fetches what an .rpm needs from the distribution it was built for,
+    // which the host's package manager cannot provide.
+    bool fetchRpmDependencies(const QStringList& missingSonames);
     
     PackageMetadata m_metadata;
     QStringList m_libraries;
