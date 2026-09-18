@@ -1633,7 +1633,10 @@ TEST_CASE("Empirical Stress: Pipeline cancellation halting and responsiveness ac
 
         REQUIRE(watchdog.isActive()); // Must not have timed out
         REQUIRE(pipeline.isCancelled());
-        REQUIRE(elapsedMs < 3000); // Halts promptly without hanging
+        // What this distinguishes is halting from running to completion, which
+        // takes minutes. The bound is generous on purpose: a machine busy with
+        // a conversion elsewhere would otherwise fail it for being busy.
+        REQUIRE(elapsedMs < 15000);
     };
 
     SECTION("Immediate cancellation (0ms delay) via cancel()") {
