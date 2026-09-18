@@ -2,6 +2,7 @@
 #define PACKAGETOAPPIMAGEPIPELINE_H
 
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <QThread>
 #include <atomic>
@@ -112,6 +113,11 @@ private:
     // Fetching the packages that provide missing libraries is attempted once
     // per conversion: a second round would download the same set again.
     bool m_triedDependencyFetch = false;
+
+    // Packages already offered to the package manager, so a second attempt at
+    // the same name is not made when a library stays missing because no such
+    // package exists.
+    QSet<QString> m_attemptedPackages;
 
 public:
     // The packages that carry parts of the application itself rather than

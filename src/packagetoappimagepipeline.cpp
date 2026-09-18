@@ -686,9 +686,31 @@ void PackageToAppImagePipeline::bundleAppDirLibraries(const QString& stageLabel)
         m_triedDependencyFetch = true;
     }
 
-    if (report.ran && !report.unresolved.isEmpty() && !m_metadata.depends.isEmpty() &&
-        !m_triedDependencyFetch) {
+    // Bundling a library reveals what it needs in turn, so a name can become
+    // missing only after an earlier fetch: kcalc learns it needs
+    // libdbusmenu-qt5 only once the KDE libraries are in place. Each round
+    // therefore asks again, and stops as soon as there is nothing new to try.
+    for (int round = 0; round < 4; ++round) {
+        if (!report.ran || report.unresolved.isEmpty()) {
+            break;
+        }
+
+        QStringList namedAfterMissing;
+        for (const QString& missing : report.unresolved) {
+            for (const QString& candidate : DependencyResolver::packageNamesForSoname(missing)) {
+                if (!m_attemptedPackages.contains(candidate) &&
+                    !namedAfterMissing.contains(candidate)) {
+                    namedAfterMissing << candidate;
+                }
+            }
+        }
+
+        const bool firstAttempt = !m_metadata.depends.isEmpty() && !m_triedDependencyFetch;
+        if (namedAfterMissing.isEmpty() && !firstAttempt) {
+            break;
+        }
         m_triedDependencyFetch = true;
+
         emit log(QString("%1 has %2 unresolved libraries; fetching the packages that provide them")
                      .arg(stageLabel)
                      .arg(report.unresolved.size()));
@@ -697,47 +719,47 @@ void PackageToAppImagePipeline::bundleAppDirLibraries(const QString& stageLabel)
         fetchSettings.enabled = true;
         m_dependencyResolver->setSettings(fetchSettings);
 
-        const QString fetched = m_tempDir + "/fetched_deps";
+        const QString fetched = m_tempDir + QString("/fetched_deps_%1").arg(round);
         QDir().mkpath(fetched);
 
-        // The library an executable was built against often belongs to a
-        // package that the declared dependencies only reach through another
-        // one, so the list is expanded before anything is downloaded.
-        QStringList toFetch = m_metadata.depends;
-
-        // A library the loader cannot find is named directly rather than
-        // waited for: the closure of declared dependencies reaches it only
-        // through several other packages, and kcalc lost libdbusmenu-qt5 that
-        // way. Which of the candidate names exists is left to the package
-        // manager - a name it does not know simply yields nothing.
-        QStringList namedAfterMissing;
-        for (const QString& missing : report.unresolved) {
-            for (const QString& candidate :
-                 DependencyResolver::packageNamesForSoname(missing)) {
-                if (!toFetch.contains(candidate)) {
-                    toFetch << candidate;
-                    namedAfterMissing << candidate;
-                }
+        QStringList toFetch;
+        if (firstAttempt) {
+            // The library an executable was built against often belongs to a
+            // package that the declared dependencies only reach through
+            // another one, so the list is expanded before anything is
+            // downloaded.
+            toFetch = m_metadata.depends;
+            const QStringList transitive =
+                m_dependencyResolver->expandLibraryDependencies(m_metadata.depends);
+            if (!transitive.isEmpty()) {
+                emit log(QString("Including %1 library packages reached through other packages")
+                             .arg(transitive.size()));
+                toFetch << transitive;
             }
+        }
+
+        for (const QString& candidate : namedAfterMissing) {
+            if (!toFetch.contains(candidate)) {
+                toFetch << candidate;
+            }
+            m_attemptedPackages.insert(candidate);
         }
         m_dependencyResolver->requirePackages(namedAfterMissing);
 
-        const QStringList transitive =
-            m_dependencyResolver->expandLibraryDependencies(m_metadata.depends);
-        if (!transitive.isEmpty()) {
-            emit log(QString("Including %1 library packages reached through other packages")
-                         .arg(transitive.size()));
-            toFetch << transitive;
-        }
         m_dependencyResolver->resolveDependencies(toFetch, fetched);
 
-        if (SubprocessWrapper::copyDirectory(fetched, m_appDirPath)) {
-            emit log("Bundled the packages the application was built against");
-            m_dependencyResolver->setSettings(m_dependencySettings);
-            report = m_dependencyResolver->bundleSystemLibraries(m_appDirPath);
-            emit log(QString("%1 library bundling after fetch: %2").arg(stageLabel, report.summary()));
-        } else {
-            m_dependencyResolver->setSettings(m_dependencySettings);
+        const bool copied = SubprocessWrapper::copyDirectory(fetched, m_appDirPath);
+        m_dependencyResolver->setSettings(m_dependencySettings);
+        if (!copied) {
+            break;
+        }
+
+        emit log("Bundled the packages the application was built against");
+        const int before = report.unresolved.size();
+        report = m_dependencyResolver->bundleSystemLibraries(m_appDirPath);
+        emit log(QString("%1 library bundling after fetch: %2").arg(stageLabel, report.summary()));
+        if (report.unresolved.size() >= before && namedAfterMissing.isEmpty()) {
+            break;
         }
     }
 
