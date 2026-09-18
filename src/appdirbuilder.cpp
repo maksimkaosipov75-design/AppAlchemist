@@ -2902,7 +2902,28 @@ QStringList AppDirBuilder::relocatePackagePaths(const QString& appDirPath,
             }
         }
         static const QRegularExpression filePattern(
-            R"((/usr/(?:share|lib|lib64|libexec)/[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)+))");
+            R"((/usr/(?:share|lib|lib64|libexec)/[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)*))");
+
+        // A directory shared with the distribution is left shared, except when
+        // the package installed a file of its own into it and reaches it
+        // through that directory: abiword builds the path to its icon from
+        // /usr/share/icons. Rewriting it in the application's own code points
+        // it at the bundled copy while every other program, the toolkit
+        // included, still sees the host's.
+        auto carriesOwnFile = [&](const QString& directory) {
+            QDirIterator content(directory, QDir::Files, QDirIterator::Subdirectories);
+            int inspected = 0;
+            while (content.hasNext() && inspected < 20000) {
+                const QString entry = QFileInfo(content.next()).completeBaseName();
+                inspected++;
+                for (const QString& name : names) {
+                    if (entry == name) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
         for (const QString& executable : ownExecutables) {
             // The path recorded for an executable points into the directory
             // the package was unpacked in; what matters here is where it ended
@@ -2931,8 +2952,12 @@ QStringList AppDirBuilder::relocatePackagePaths(const QString& appDirPath,
             while (matches.hasNext()) {
                 const QString reference = matches.next().captured(1);
                 const QFileInfo inBundle(appDirPath + reference);
-                if (!inBundle.isFile()) {
-                    continue;   // only a file the bundle actually carries
+                if (inBundle.isDir()) {
+                    if (!carriesOwnFile(inBundle.absoluteFilePath())) {
+                        continue;
+                    }
+                } else if (!inBundle.isFile()) {
+                    continue;   // only what the bundle actually carries
                 }
                 const QByteArray encoded = reference.toUtf8();
                 if (!ownedPaths.contains(encoded)) {

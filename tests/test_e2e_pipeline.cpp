@@ -679,6 +679,12 @@ TEST_CASE("A file the package ships is reached even in a shared directory",
     icon.write("\x89PNG");
     icon.close();
 
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/share/locale/ru/LC_MESSAGES"));
+    QFile translation(appDirPath + "/usr/share/locale/ru/LC_MESSAGES/coreutils.mo");
+    REQUIRE(translation.open(QIODevice::WriteOnly));
+    translation.write("mo");
+    translation.close();
+
     const QString binary = appDirPath + "/usr/bin/sampleword";
     REQUIRE(TestHelpers::createSampleElf(binary));
     {
@@ -686,9 +692,9 @@ TEST_CASE("A file the package ships is reached even in a shared directory",
         REQUIRE(file.open(QIODevice::Append));
         file.write("/usr/share/icons/hicolor/16x16/apps/sampleword.png");
         file.write("\0", 1);
-        // A directory shared with the distribution stays as it is: the host's
-        // icons and translations must remain reachable.
-        file.write("/usr/share/icons/hicolor");
+        // A shared directory holding nothing of the package's stays as it
+        // is, so the host's translations remain reachable.
+        file.write("/usr/share/locale");
         file.write("\0", 1);
         file.close();
     }
@@ -709,7 +715,7 @@ TEST_CASE("A file the package ships is reached even in a shared directory",
     patched.close();
 
     REQUIRE(content.contains("././/share/icons/hicolor/16x16/apps/sampleword.png"));
-    REQUIRE(content.contains(QByteArray("/usr/share/icons/hicolor\0", 25)));
+    REQUIRE(content.contains(QByteArray("/usr/share/locale\0", 18)));
 }
 
 TEST_CASE("The application's own library is read for its file references",
