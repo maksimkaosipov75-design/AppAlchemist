@@ -791,6 +791,16 @@ bool PackageToAppImagePipeline::optimizeBuiltAppDir(const QString& stageLabel) {
 }
 
 bool PackageToAppImagePipeline::packageBuiltAppDir(const QString& stageLabel) {
+    // The environment AppRun exports describes what the bundle holds, and the
+    // bundle only stops changing here: libraries, their data directories and
+    // fetched packages all arrive after the AppDir is first built. Writing it
+    // last is what makes the two agree - Guile's startup files were bundled
+    // but unnamed, and the interpreter aborted as if they were missing.
+    if (!m_appDirBuilder->createAppRun(m_appDirPath, m_metadata)) {
+        emit log(QString("WARNING: %1 could not write AppRun with the final bundle contents.")
+                     .arg(stageLabel));
+    }
+
     const int removedLinks = DependencyResolver::removeDanglingSymlinks(m_appDirPath);
     if (removedLinks > 0) {
         emit log(QString("%1 removed %2 symlinks that resolved to nothing")
