@@ -854,6 +854,43 @@ bool AppDirBuilder::buildAppDir(const QString& appDirPath,
     return true;
 }
 
+namespace {
+
+// Directories a distribution uses for packaging machinery rather than for the
+// application. Debian ships /usr/share/bug/<package>, a script that collects
+// information for bug reports; it carries the application's name but is not
+// the application, and copying it into usr/bin overwrote the real program.
+bool isPackagingMetadata(const QString& relativePath) {
+    static const QStringList kMetadataDirs = {
+        "usr/share/bug/",
+        "usr/share/doc/",
+        "usr/share/man/",
+        "usr/share/lintian/",
+        "usr/share/menu/",
+        "usr/share/apport/",
+        "usr/share/python3/runtime.d/",
+        "usr/lib/python3/dist-packages/__pycache__/",
+        "DEBIAN/"
+    };
+    for (const QString& directory : kMetadataDirs) {
+        if (relativePath.startsWith(directory)) {
+            return true;
+        }
+    }
+    return relativePath.endsWith(".rtupdate") || relativePath.endsWith(".rtremove");
+}
+
+// Whether the file already sits where programs live, in which case it must not
+// be displaced by one copied in from somewhere else under the same name.
+bool isProgramDirectory(const QString& relativePath) {
+    return relativePath.startsWith("usr/bin/") || relativePath.startsWith("usr/sbin/") ||
+           relativePath.startsWith("usr/games/") || relativePath.startsWith("usr/libexec/") ||
+           relativePath.startsWith("bin/") || relativePath.startsWith("sbin/") ||
+           relativePath.startsWith("opt/");
+}
+
+} // namespace
+
 bool AppDirBuilder::copyExecutables(const QString& appDirPath,
                                     const QString& extractedDebDir,
                                     const QStringList& executables) {
@@ -890,6 +927,11 @@ bool AppDirBuilder::copyExecutables(const QString& appDirPath,
             relativePath = relativePath.mid(dataPos + 6);
         }
         
+        if (isPackagingMetadata(relativePath)) {
+            qDebug() << "Skipping packaging metadata, not a program:" << relativePath;
+            continue;
+        }
+
         // Map to AppDir structure - preserve original directory structure
         QString targetPath;
         if (relativePath.startsWith("usr/bin/") || relativePath.startsWith("usr/sbin/")) {
@@ -910,6 +952,14 @@ bool AppDirBuilder::copyExecutables(const QString& appDirPath,
             }
         }
         
+        // A file copied in from elsewhere must never displace one that already
+        // sits where programs live: they can share a name while only one of
+        // them is the application.
+        if (!isProgramDirectory(relativePath) && QFileInfo::exists(targetPath)) {
+            qDebug() << "Keeping the program already in place rather than" << relativePath;
+            continue;
+        }
+
         // Create target directory if needed
         QFileInfo targetInfo(targetPath);
         QDir targetDir = targetInfo.dir();

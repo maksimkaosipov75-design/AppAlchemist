@@ -491,3 +491,50 @@ TEST_CASE("Data paths compiled into an application are made bundle-relative",
         REQUIRE_FALSE(content.contains("././share/icons"));
     }
 }
+
+TEST_CASE("A packaging script never replaces the program it is named after",
+          "[appdir][executables]") {
+    // Debian ships /usr/share/bug/<package>: a small script that collects
+    // information for bug reports. It carries the application's name, and
+    // copying it into usr/bin left gedit's bundle with a three-line shell
+    // script where the program should have been.
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+    const QString extracted = tempDir.filePath("extracted/data");
+    const QString appDirPath = tempDir.filePath("AppDir");
+
+    REQUIRE(QDir().mkpath(extracted + "/usr/bin"));
+    REQUIRE(QDir().mkpath(extracted + "/usr/share/bug"));
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/bin"));
+
+    REQUIRE(TestHelpers::createSampleElf(extracted + "/usr/bin/sample-app"));
+
+    QFile bugScript(extracted + "/usr/share/bug/sample-app");
+    REQUIRE(bugScript.open(QIODevice::WriteOnly));
+    bugScript.write("#! /bin/sh\n\nexec /usr/share/sample-app/bugreport.sh >&3\n");
+    bugScript.close();
+    QFile::setPermissions(extracted + "/usr/share/bug/sample-app",
+                          QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+
+    AppDirBuilder builder;
+
+    SECTION("the bug script is not taken for the program, whichever comes first") {
+        REQUIRE(builder.copyExecutables(appDirPath, tempDir.filePath("extracted"),
+                                        {extracted + "/usr/share/bug/sample-app",
+                                         extracted + "/usr/bin/sample-app"}));
+
+        QFile placed(appDirPath + "/usr/bin/sample-app");
+        REQUIRE(placed.open(QIODevice::ReadOnly));
+        REQUIRE(placed.read(4) == QByteArray("\x7f""ELF", 4));
+    }
+
+    SECTION("nor when it is copied last") {
+        REQUIRE(builder.copyExecutables(appDirPath, tempDir.filePath("extracted"),
+                                        {extracted + "/usr/bin/sample-app",
+                                         extracted + "/usr/share/bug/sample-app"}));
+
+        QFile placed(appDirPath + "/usr/bin/sample-app");
+        REQUIRE(placed.open(QIODevice::ReadOnly));
+        REQUIRE(placed.read(4) == QByteArray("\x7f""ELF", 4));
+    }
+}

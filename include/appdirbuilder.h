@@ -30,11 +30,16 @@ public:
     // start. Returns the absolute paths that were relocated.
     QStringList relocatePackagePaths(const QString& appDirPath, const PackageMetadata& metadata);
     
+    // Places the package's executables in the bundle. A package carries files
+    // that share the application's name without being it - Debian's
+    // /usr/share/bug/<package>, for one - so what lives where programs live
+    // is never displaced by a copy from elsewhere.
+    bool copyExecutables(const QString& appDirPath,
+                         const QString& extractedDebDir,
+                         const QStringList& executables);
+
 private:
     bool createDirectoryStructure(const QString& appDirPath);
-    bool copyExecutables(const QString& appDirPath, 
-                        const QString& extractedDebDir,
-                        const QStringList& executables);
     bool copyLibraries(const QString& appDirPath, const QStringList& libraries);
     bool copyResources(const QString& appDirPath, const QString& extractedDebDir);
     bool copyMissingDirectoryContents(const QString& sourcePath, const QString& targetPath);

@@ -1184,6 +1184,10 @@ QStringList DependencyResolver::selectRuntimePackages(const QString& aptOutput,
     // can supply it - so modules are all taken, while plain libraries, which
     // are merely a convenience here, are capped to keep the bundle sane.
     constexpr int kLibraryLimit = 80;
+    // Modules are kept generously rather than without limit: a closure that
+    // ran away would spend the conversion downloading packages the
+    // application never imports.
+    constexpr int kModuleLimit = 150;
 
     QStringList modules;
     QStringList libraries;
@@ -1201,7 +1205,9 @@ QStringList DependencyResolver::selectRuntimePackages(const QString& aptOutput,
         }
         if (candidate.startsWith("python3-") || candidate.startsWith("python-") ||
             candidate.startsWith("gir1.2-")) {
-            modules << candidate;
+            if (modules.size() < kModuleLimit) {
+                modules << candidate;
+            }
         } else if (candidate.startsWith("lib") && libraries.size() < kLibraryLimit) {
             libraries << candidate;
         }
