@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(appalchemist VERSION 1.7.0 LANGUAGES CXX)
+project(appalchemist VERSION 1.8.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
