@@ -826,3 +826,56 @@ TEST_CASE("A desktop file with a non-standard group is made valid",
         REQUIRE_FALSE(content.contains("[X-X-Custom Group]"));
     }
 }
+
+TEST_CASE("A Python module finds its data directory from its own location",
+          "[appdir][relocation][python]") {
+    // A Python module carries its data directory as a constant and joins it
+    // with the directory of the module itself. Making that constant relative
+    // to the working directory turns the join into a path under the module,
+    // and catfish failed with project_path_not_found.
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+    const QString appDirPath = tempDir.path();
+
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/bin"));
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/share/samplefish/ui"));
+    REQUIRE(QDir().mkpath(appDirPath + "/usr/lib/python3/dist-packages/samplefish_lib"));
+    REQUIRE(TestHelpers::createSampleElf(appDirPath + "/usr/bin/samplefish"));
+
+    const QString module =
+        appDirPath + "/usr/lib/python3/dist-packages/samplefish_lib/config.py";
+    QFile source(module);
+    REQUIRE(source.open(QIODevice::WriteOnly | QIODevice::Text));
+    source.write("import os\n"
+                 "__data_directory__ = '/usr/share/samplefish/'\n"
+                 "def get_data_path():\n"
+                 "    return os.path.abspath(\n"
+                 "        os.path.join(os.path.dirname(__file__), __data_directory__))\n");
+    source.close();
+
+    PackageMetadata meta;
+    meta.package = "samplefish";
+    meta.mainExecutable = "usr/bin/samplefish";
+    meta.executables = {"usr/bin/samplefish"};
+
+    AppDirBuilder builder;
+    builder.relocatePackagePaths(appDirPath, meta);
+
+    QFile updated(module);
+    REQUIRE(updated.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QString content = updated.readAll();
+    updated.close();
+
+    SECTION("the path now leads out of the module to the data") {
+        REQUIRE(content.contains("../../../../share/samplefish"));
+        REQUIRE_FALSE(content.contains("'/usr/share/samplefish"));
+    }
+
+    SECTION("and it resolves to the directory in the bundle") {
+        const QString relative = QString(content).section('\'', 1, 1);
+        const QString resolved = QDir::cleanPath(
+            QFileInfo(module).absolutePath() + "/" + relative);
+        REQUIRE(QDir(resolved).exists());
+        REQUIRE(QDir(resolved).exists("ui"));
+    }
+}

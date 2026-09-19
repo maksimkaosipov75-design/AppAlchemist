@@ -665,13 +665,29 @@ void PackageToAppImagePipeline::bundleAppDirLibraries(const QString& stageLabel)
     // Each round of fetching reveals the libraries the newly bundled ones need
     // in turn, so this repeats while it keeps making progress.
     if (m_packageType == PackageFormat::Rpm) {
-        for (int round = 0; round < 4 && report.ran && !report.unresolved.isEmpty(); ++round) {
-            const int before = report.unresolved.size();
+        // A fetched library brings its own dependencies, so the set of missing
+        // names changes without necessarily getting smaller: bundling Guile
+        // for aisleriot left exactly one name missing again, a different one.
+        // Progress is therefore measured by whether a name has been asked for
+        // before, not by how many remain.
+        QSet<QString> requested;
+        for (int round = 0; round < 6 && report.ran && !report.unresolved.isEmpty(); ++round) {
+            QStringList wanted;
+            for (const QString& missing : report.unresolved) {
+                if (!requested.contains(missing)) {
+                    wanted << missing;
+                    requested.insert(missing);
+                }
+            }
+            if (wanted.isEmpty()) {
+                break;   // everything still missing has already been asked for
+            }
+
             emit log(QString("%1 has %2 unresolved libraries; fetching them from the distribution "
                              "the package was built for")
                          .arg(stageLabel)
-                         .arg(before));
-            if (!fetchRpmDependencies(report.unresolved)) {
+                         .arg(wanted.size()));
+            if (!fetchRpmDependencies(wanted)) {
                 break;
             }
             const QStringList relocated =
@@ -679,9 +695,6 @@ void PackageToAppImagePipeline::bundleAppDirLibraries(const QString& stageLabel)
             Q_UNUSED(relocated);
             report = m_dependencyResolver->bundleSystemLibraries(m_appDirPath);
             emit log(QString("%1 library bundling after fetch: %2").arg(stageLabel, report.summary()));
-            if (report.unresolved.size() >= before) {
-                break;   // nothing more to gain from another round
-            }
         }
         m_triedDependencyFetch = true;
     }

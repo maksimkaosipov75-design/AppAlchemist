@@ -2674,6 +2674,56 @@ bool rewriteReferences(const QString& filePath, const QList<QByteArray>& ownedPa
     return written;
 }
 
+// Rewrites the given absolute paths in a Python source file to paths relative
+// to the file itself.
+//
+// A Python module that carries its data directory as a constant joins it with
+// the directory of the module: os.path.join(dirname(__file__), DATA_DIR).
+// Making the constant relative to the working directory - which is what the
+// other files want - turns that join into a path under the module instead,
+// and the application fails to find its own interface files. Relative to the
+// module, the join lands where the data actually is. A source file has no
+// length to preserve, so the replacement may be as long as it needs.
+bool rewritePythonReferences(const QString& filePath, const QString& appDirPath,
+                             const QList<QByteArray>& ownedPaths) {
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    QByteArray content = file.readAll();
+    file.close();
+
+    const QDir fileDir(QFileInfo(filePath).absolutePath());
+    bool changed = false;
+    for (const QByteArray& owned : ownedPaths) {
+        if (!content.contains(owned)) {
+            continue;
+        }
+        const QString target = appDirPath + QString::fromUtf8(owned);
+        const QByteArray relative = fileDir.relativeFilePath(target).toUtf8();
+        if (relative.isEmpty()) {
+            continue;
+        }
+        content.replace(owned, relative);
+        changed = true;
+    }
+
+    if (!changed) {
+        return false;
+    }
+
+    const QFile::Permissions permissions = QFileInfo(filePath).permissions();
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return false;
+    }
+    const bool written = file.write(content) == content.size();
+    file.close();
+    if (written) {
+        QFile::setPermissions(filePath, permissions);
+    }
+    return written;
+}
+
 // A file is treated as a script when it contains no binary data: sourced
 // fragments have no shebang, so requiring one would miss exactly the helpers
 // that packages split their launchers into.
@@ -3040,7 +3090,9 @@ QStringList AppDirBuilder::relocatePackagePaths(const QString& appDirPath,
                     continue;
                 }
             }
-            if (rewriteReferences(candidate, ownedPaths)) {
+            const bool isPythonSource = info.fileName().endsWith(".py");
+            if (isPythonSource ? rewritePythonReferences(candidate, appDirPath, ownedPaths)
+                               : rewriteReferences(candidate, ownedPaths)) {
                 patchedFiles++;
             }
         }
